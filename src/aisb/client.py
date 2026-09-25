@@ -1,6 +1,6 @@
 from types import TracebackType
 
-from .api import Containers, Images, Networks, System, Volumes
+from .api import Containers, Db, Fs, Http, Images, MongoOps, Networks, RedisOps, Svc, System, Volumes
 from .ops import Resource
 from .transport import Transport, resolve_endpoint
 
@@ -15,6 +15,12 @@ class Docker:
         self.networks = Networks(self.transport)
         self.volumes = Volumes(self.transport)
         self.system = System(self.transport)
+        self.svc = Svc(self.transport)
+        self.db = Db(self.transport)
+        self.redis = RedisOps(self.transport)
+        self.mongo = MongoOps(self.transport)
+        self.http = Http(self.transport)
+        self.fs = Fs(self.transport)
 
     def resource(self, name: str) -> Resource:
         res = getattr(self, name, None)

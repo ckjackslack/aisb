@@ -1,7 +1,9 @@
 """Fake Docker daemon on a unix socket: mocks the process boundary, not aisb internals."""
 
+import io
 import json
 import re
+import tarfile
 import shutil
 import socketserver
 import tempfile
@@ -61,6 +63,27 @@ class FakeDaemon:
         self.routes.insert(0, (method, re.compile(pattern), reply if reply is not None else Reply(**kw)))
         return self
 
+    def execs(self, ref: str, results: list[tuple[bytes, bytes, int]]) -> list[Seen]:
+        """Serve a queue of exec results for `ref`; returns the list that collects each exec's create request."""
+        created: list[Seen] = []
+
+        def create(seen: Seen) -> Reply:
+            created.append(seen)
+            return Reply(201, json={"Id": f"e{len(created) - 1}"})
+
+        def start(seen: Seen) -> Reply:
+            out, err, _ = results[int(seen.path.split("/")[2][1:])]
+            return Reply(body=(frame(1, out) if out else b"") + (frame(2, err) if err else b""),
+                         content_type="application/vnd.docker.multiplexed-stream")
+
+        def inspect(seen: Seen) -> Reply:
+            return Reply(json={"ExitCode": results[int(seen.path.split("/")[2][1:])][2]})
+
+        self.on("POST", f"/containers/{ref}/exec", create)
+        self.on("POST", r"/exec/e\d+/start", start)
+        self.on("GET", r"/exec/e\d+/json", inspect)
+        return created
+
     def calls(self, method: str | None = None) -> list[tuple[str, str]]:
         return [(s.method, s.path) for s in self.seen if method in (None, s.method)]
 
@@ -98,7 +121,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send(reply(seen) if callable(reply) else reply)
         self._send(Reply(404, json={"message": f"no route for {self.command} {seen.path}"}))
 
-    do_GET = do_POST = do_PUT = do_DELETE = _dispatch
+    do_GET = do_POST = do_PUT = do_DELETE = do_HEAD = _dispatch
 
     def _send(self, r: Reply) -> None:
         self.send_response(r.status)
@@ -114,10 +137,25 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
             self.wfile.write(b"0\r\n\r\n")
         else:
-            data = r.payload()
+            data = b"" if self.command == "HEAD" else r.payload()
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+
+
+def tar_of(files: dict[str, bytes], dirs: tuple[str, ...] = ()) -> bytes:
+    """An archive like GET /containers/{id}/archive returns."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for d in dirs:
+            info = tarfile.TarInfo(d)
+            info.type, info.mode = tarfile.DIRTYPE, 0o755
+            tar.addfile(info)
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size, info.mode, info.mtime = len(data), 0o644, 1700000000
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
 
 
 def frame(stream: int, data: bytes) -> bytes:

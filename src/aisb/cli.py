@@ -79,6 +79,10 @@ def emit(obj: Any, as_json: bool, out: TextIO) -> None:
         out.write(json.dumps(data, ensure_ascii=False) + "\n")
     elif isinstance(data, list) and data and all(isinstance(r, dict) for r in data):
         out.write(_table(data) + "\n")
+    elif isinstance(data, dict) and len(lists := [k for k, v in data.items() if isinstance(v, list) and v
+                                                  and all(isinstance(r, dict) for r in v)]) == 1:
+        out.write(_table(data[lists[0]]) + "\n")
+        out.write(json.dumps({k: v for k, v in data.items() if k != lists[0]}) + "\n")
     elif isinstance(data, dict) and isinstance(data.get("output"), str):
         meta = {k: v for k, v in data.items() if k != "output"}
         out.write(data["output"] + ("" if data["output"].endswith("\n") else "\n"))

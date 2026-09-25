@@ -97,3 +97,59 @@ def test_snapshot_changes_sees_new_container(docker, name, tmp_path):
     diff = docker.system.changes(str(path))
     assert name in diff["containers"]["added"]
     assert f"aisb containers rm {name} --force --dry-run" in diff["cleanup"]
+
+
+def _has_image(docker: Docker, ref: str) -> bool:
+    try:
+        docker.images.inspect(ref, fields="Id")
+        return True
+    except NotFound:
+        return False
+
+
+@pytest.fixture
+def service(docker):
+    made: list[str] = []
+
+    def start(image: str, *cmd: str, **kw) -> str:
+        if not _has_image(docker, image):
+            pytest.skip(f"{image} not pulled")
+        n = f"aisb-svc-{uuid.uuid4().hex[:8]}"
+        docker.containers.run(image, *cmd, name=n, detach=True, **kw)
+        made.append(n)
+        return n
+    yield start
+    for n in made:
+        docker.containers.rm(n, force=True, volumes=True)
+
+
+def test_postgres_roundtrip(docker, service, tmp_path):
+    pg = service("postgres:16-alpine", env=["POSTGRES_PASSWORD=pw", "POSTGRES_DB=shop"])
+    assert docker.svc.ready(pg, within=90, stable=1)["ok"]
+    docker.db.exec_(pg, "create table t (id int primary key, note text); insert into t values (1, null), (2, '')")
+    rows = docker.db.query(pg, "select id, note from t order by id")["rows"]
+    assert rows == [{"id": 1, "note": None}, {"id": 2, "note": ""}]
+    with pytest.raises(DockerError, match="read-only transaction"):
+        docker.db.query(pg, "delete from t")
+    dump = tmp_path / "d.sql.gz"
+    docker.db.dump(pg, str(dump))
+    docker.db.exec_(pg, "create database copy")
+    docker.db.restore(pg, str(dump), database="copy")
+    assert docker.db.query(pg, "select count(*) n from t", database="copy")["rows"] == [{"n": 2}]
+    assert [c["name"] for c in docker.db.describe(pg, "t")["columns"]] == ["id", "note"]
+
+
+def test_redis_scan_and_get(docker, service):
+    r = service("redis:7-alpine", "redis-server", "--requirepass", "p w")
+    assert docker.svc.ready(r, within=30, stable=0.5)["ok"]
+    docker.redis.cmd(r, "HSET", "user:1", "name", "Ann")
+    docker.redis.cmd(r, "SET", "note", "multi\nline")
+    assert docker.redis.scan(r, "user:*")["keys"][0]["type"] == "hash"
+    assert docker.redis.get(r, "user:1")["value"] == {"name": "Ann"}
+    assert docker.redis.get(r, "note")["value"] == "multi\nline"
+
+
+def test_fs_reads_image_files_without_exec(docker, service):
+    web = service("nginx:alpine")
+    assert "worker_processes" in docker.fs.cat(web, "/etc/nginx/nginx.conf")["output"]
+    assert any(e["path"] == "default.conf" for e in docker.fs.ls(web, "/etc/nginx/conf.d")["entries"])

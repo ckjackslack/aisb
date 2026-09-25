@@ -38,7 +38,7 @@ def test_op_params_do_not_shadow_cli_globals():
 
 def test_destructive_ops_are_the_only_rm_like_ones():
     destroy = {o.qualname for ops in registry().values() for o in ops.values() if o.tier is Tier.DESTROY}
-    assert destroy == {"containers.rm", "images.rmi", "networks.rm", "volumes.rm", "system.prune"}
+    assert destroy == {"containers.rm", "images.rmi", "networks.rm", "volumes.rm", "system.prune", "db.restore"}
 
 
 def test_json_schema_for_run():

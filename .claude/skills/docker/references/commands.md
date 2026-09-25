@@ -72,3 +72,60 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | snapshot | read | `aisb system snapshot` | Inventory of containers, images, volumes and networks; save it and diff later with `system changes`. |
 | changes | read | `aisb system changes BEFORE [AFTER]` | What was added, removed, recreated or changed between two snapshots, with dry-run cleanup commands. |
 | prune | destroy | `aisb system prune [--no-containers] [--no-images] [--no-networks] [--volumes] [--all-images] [--managed] [--dry-run] [--yes]` | Remove unused objects. Volumes are opt-in. |
+
+## svc
+
+| op | tier | usage | summary |
+|---|---|---|---|
+| list | read | `aisb svc list [--reveal]` | Detect services in running containers, with host-usable connection URLs (secrets masked). |
+| url | read | `aisb svc url REF [--reveal] [--hostname HOSTNAME]` | Connection URL for host tools (psql, redis-cli, DBeaver, app config) via the published port. |
+| ready | read | `aisb svc ready REF [--within WITHIN] [--stable STABLE] [--interval INTERVAL]` | Wait until the service really answers (SELECT 1 / PING / ping / TCP), not just until a log line appears. |
+| stats | read | `aisb svc stats REF` | Service vitals: running queries/blockers (SQL), memory/hit rate (Redis), ops/connections (Mongo). |
+| check | read | `aisb svc check REF` | Validate the service configuration (nginx -t, httpd -t, caddy validate, haproxy -c, pg_file_settings). |
+| reload | mutate | `aisb svc reload REF [--force] [--dry-run]` | Validate the config, then reload gracefully. A failing check aborts the reload. |
+
+## db
+
+| op | tier | usage | summary |
+|---|---|---|---|
+| query | read | `aisb db query REF SQL [--database DATABASE] [--format FORMAT] [--limit LIMIT] [--out OUT] [--seconds SECONDS] [--engine ENGINE] [--path PATH]` | Run a read-only SQL query in a Postgres/MySQL/MariaDB/SQLite container; returns typed rows. |
+| exec | mutate | `aisb db exec REF [SQL] [--file FILE] [--database DATABASE] [--single-transaction] [--format FORMAT] [--seconds SECONDS] [--engine ENGINE] [--dry-run]` | Run SQL with write access (DML/DDL/migrations). Preview with --dry-run. |
+| tables | read | `aisb db tables REF [--database DATABASE] [--format FORMAT] [--engine ENGINE] [--path PATH]` | Tables and views with estimated rows and on-disk size. |
+| describe | read | `aisb db describe REF TABLE [--database DATABASE] [--engine ENGINE] [--path PATH]` | Columns, keys, indexes and constraints of one table. |
+| dump | read | `aisb db dump REF OUT [--database DATABASE] [--schema-only] [--table TABLE]... [--engine ENGINE]` | Stream a SQL dump (pg_dump / mysqldump) straight to a host file, gzipping on the fly. |
+| restore | destroy | `aisb db restore REF FILE [--database DATABASE] [--no-single-transaction] [--engine ENGINE] [--dry-run] [--yes]` | Run a SQL dump into the database. Overwrites data, so it needs confirmation. |
+| activity | read | `aisb db activity REF` | What the database is doing now: running queries (longest first), blockers, connections, cache hit ratio. |
+| kill | mutate | `aisb db kill REF PID [--terminate] [--dry-run]` | Cancel a running query (or terminate its connection). |
+
+## redis
+
+| op | tier | usage | summary |
+|---|---|---|---|
+| info | read | `aisb redis info REF [--section SECTION] [--raw]` | Server summary: memory, clients, hit rate, ops/sec, keyspace, persistence. |
+| scan | read | `aisb redis scan REF [PATTERN] [--limit LIMIT] [--type TYPE]` | Find keys with SCAN (never KEYS); each with type, TTL and memory, fetched in one Lua call per 200 keys. |
+| get | read | `aisb redis get REF KEY [--limit LIMIT]` | Read any key by its type (string/hash/list/set/zset/stream) with TTL and size. |
+| cmd | mutate | `aisb redis cmd REF [-- ARGS...] [--dry-run]` | Run any Redis command; structured reply when scriptable, raw output otherwise. |
+
+## mongo
+
+| op | tier | usage | summary |
+|---|---|---|---|
+| collections | read | `aisb mongo collections REF [--database DATABASE]` | Collections and views with estimated document counts. |
+| find | read | `aisb mongo find REF COLLECTION [FILTER] [--projection PROJECTION] [--sort SORT] [--limit LIMIT] [--database DATABASE] [--format FORMAT]` | Query a collection; documents as relaxed Extended JSON, or a flattened table. |
+| eval | mutate | `aisb mongo eval REF SCRIPT [--database DATABASE] [--dry-run]` | Run mongosh JavaScript against a database and return the result as JSON. |
+
+## http
+
+| op | tier | usage | summary |
+|---|---|---|---|
+| get | read | `aisb http get REF [PATH] [--port PORT] [--header HEADER]... [--https] [--insecure] [--head] [--max-bytes MAX_BYTES] [--seconds SECONDS]` | GET a container endpoint: status, timing, key headers, body (parsed when JSON). Exit 4 on HTTP errors. |
+| send | mutate | `aisb http send REF [PATH] [--method METHOD] [--data DATA] [--json-data JSON_DATA] [--header HEADER]... [--port PORT] [--https] [--insecure] [--max-bytes MAX_BYTES] [--seconds SECONDS] [--dry-run]` | Send a non-GET request to a container endpoint (state-changing, so mutate tier). |
+
+## fs
+
+| op | tier | usage | summary |
+|---|---|---|---|
+| stat | read | `aisb fs stat REF PATH` | Type, size, mode and mtime of a path (a single HEAD request). |
+| ls | read | `aisb fs ls REF [PATH] [--limit LIMIT] [--max-mb MAX_MB]` | List a directory (one level) with type, size, mode, mtime and link targets. |
+| find | read | `aisb fs find REF [PATH] [--name NAME] [--type TYPE] [--min-size MIN_SIZE] [--limit LIMIT] [--max-mb MAX_MB]` | Recursive search by name glob, type and size, like `find`, without needing find in the image. |
+| cat | read | `aisb fs cat REF PATH [--max-bytes MAX_BYTES] [--tail]` | Print a file (text), or its size and sha256 when it is binary. |

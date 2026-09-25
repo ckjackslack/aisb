@@ -1,6 +1,6 @@
 ---
 name: docker
-description: Inspect, diagnose, and manage Docker containers, images, networks, and volumes through the stdlib-only `aisb` CLI (JSON output, tiered safety). Use when the user asks about running containers, docker logs, why a container is crashing / restarting / unhealthy / OOM-killed, port or network problems between containers, disk usage and cleanup, building or pulling images, running a one-off container, or executing a command inside a container.
+description: Inspect, diagnose, and manage Docker containers, images, networks, and volumes, and operate the services inside them (Postgres, MySQL/MariaDB, SQLite, Redis, MongoDB, nginx and other web servers), through the stdlib-only `aisb` CLI (JSON output, tiered safety). Use when the user asks about running containers, docker logs, why a container is crashing / restarting / unhealthy / OOM-killed, port or network problems, disk usage and cleanup, building or running images, executing a command in a container, querying or dumping a database in a container, inspecting Redis keys, checking what queries are running or blocked, reloading nginx, calling a container's HTTP endpoint, or reading files from a container.
 ---
 
 # Docker via `aisb`
@@ -47,6 +47,28 @@ Doctor findings are **leads, not proof**. `likely_cause` is the top cause-type f
 Every `--dry-run` of `run` includes preflight `warnings` (name in use, missing network or volume, image not local, host port taken). Read them before executing.
 Before a session that will create or change things, take a snapshot so you can report and clean up precisely.
 
+## Services inside containers: no host clients, no credential hunting
+
+`aisb` detects the service (`svc list`), reads credentials from the container env (including `*_FILE` secrets), and runs the service's own CLI **inside** the container. Output comes back as typed JSON, or `--format table|markdown|csv`, or `--out file.csv`.
+
+| Task | Command | Notes |
+|---|---|---|
+| What runs where, and how to connect | `svc list`, `svc url NAME` | Host URLs with secrets masked. `--reveal` prints the password, so use it only if the user asks. A `note` explains unpublished ports. |
+| Wait until it *really* works | `svc ready NAME --within 120` | Real probe (`SELECT 1`, `PING`, TCP) plus the init-phase check. Use this before the first query on a new DB, **not** `containers wait --log`. |
+| Read data | `db query NAME "SELECT ..."` | **Read-only enforced by the server.** Decimals stay exact strings, integers become numbers, NULL stays null. `--limit` defaults to 1000. |
+| Change data or schema | `db exec NAME "UPDATE ..."`, `db exec NAME --file m.sql` | Mutate tier: preview with `--dry-run`, which redacts secrets. Returns `affected`. |
+| Explore schema | `db tables NAME`, `db describe NAME TABLE` | Postgres, MySQL/MariaDB, SQLite (`--path /file.db` inside the container; no sqlite3 needed there). |
+| Backup / restore | `db dump NAME out.sql.gz`; `db restore NAME f.sql.gz` | Dump streams gzipped to the host. **Restore is destroy tier.** |
+| Stuck or slow DB | `db activity NAME`, then `db kill NAME PID [--terminate]` | Longest-running first, with `blocked_by` pids and waiting locks. Kill the *blocker*, after approval. |
+| Redis | `redis info`, `redis scan 'p:*'`, `redis get KEY`, `redis cmd -- ARGS` | Uses SCAN, never KEYS. `cmd` is mutate tier. |
+| MongoDB | `mongo collections`, `mongo find COLL '{"a":1}' --sort '{"t":-1}'`, `mongo eval 'return ...'` | Filters are JSON/Extended JSON. `eval` is mutate tier. |
+| Vitals | `svc stats NAME` | Per engine: activity, memory and hit rate, opcounters. |
+| Web server config | `svc check NAME`; `svc reload NAME` | `reload` validates first and **refuses** a broken config (exit 4, with the error and line). |
+| HTTP | `http get NAME /health`, `http send NAME /x --json-data '{}'` | Resolves the published port or container IP. Exit 4 on status >= 400. `send` is mutate tier. |
+| Files, even in distroless or stopped containers | `fs ls / cat / find / stat NAME PATH` | Archive API: no shell or coreutils needed in the image. |
+
+Rules: prefer `db query` over `db exec` for anything read-only. Put `LIMIT` in exploratory SQL. Never `--reveal` or print credentials unless the user asked. Treat `db exec`, `db kill`, `redis cmd`, `mongo eval` and `http send` as changes that need clear intent.
+
 ## Safety rules (non-negotiable)
 
 Every op has a tier, listed in the `tier` column of [references/commands.md](references/commands.md), which is the source of truth.
@@ -78,5 +100,7 @@ For multi-step tasks, read [references/playbooks.md](references/playbooks.md) an
 - Reclaim disk space safely.
 - Run a reproducible service from a RunSpec JSON file.
 - Build an image and smoke-test it.
+- Investigate a slow or stuck database.
+- Safely change data in a database container.
 
 End every diagnosis with: **evidence** (quoted fields and log lines), **root-cause hypothesis**, and **proposed fix**, including the exact command. Mark it destroy-tier if it is one.

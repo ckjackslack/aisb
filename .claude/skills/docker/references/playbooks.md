@@ -89,3 +89,18 @@ Stop *looking for causes* at the first step that explains the problem. Still gat
 1. At the start: `A system snapshot > /tmp/aisb-before.json`.
 2. At the end: `A system changes /tmp/aisb-before.json` shows what was added, removed or recreated. Report it to the user.
 3. `cleanup` lists dry-run destroy commands for exactly the added objects. Run them, show the plans, **ask**, then re-run the approved ones with `--yes` in place of `--dry-run`.
+
+## Investigate a slow or stuck database
+
+1. `A svc stats NAME` (or `A db activity NAME`). Look at `active` (longest first), `blocked_by`, `locks_waiting`, and connections against `max_connections`.
+2. A query with a non-empty `blocked_by` is a victim. The pid it points to is the **blocker**, usually an idle-in-transaction session or a long migration.
+3. Show the user the blocker's query, age and user. `A db kill NAME PID --dry-run`, then after approval `A db kill NAME PID` (cancel). Use `--terminate` only if cancel is not enough.
+4. Re-run `A db activity NAME` to confirm `locks_waiting` is 0.
+5. Near the connection limit: check the app's pool settings, and whether many sessions are `idle in transaction`.
+
+## Safely change data in a database container
+
+1. Explore read-only: `A db tables NAME`, `A db describe NAME TABLE`, then `A db query NAME "SELECT count(*) ... WHERE <the same predicate>"` to learn how many rows will change.
+2. Back up what you will touch: `A db dump NAME /tmp/before.sql.gz --table TABLE`.
+3. Preview: `A db exec NAME "UPDATE ... WHERE ..." --dry-run`. Show the statement and the expected row count, and get approval.
+4. Run it and compare `affected` with the count from step 1. If they differ, stop and tell the user. The dump from step 2 is the undo path (`db restore`, destroy tier).

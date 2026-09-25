@@ -2,13 +2,15 @@ import re
 import shlex
 import socket
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
 from .. import insights
 from ..errors import NotFound, NotModified
 from ..models import Container, RunSpec, parse_port
 from ..ops import Resource, Tier, op
-from ..streams import decode_output, tar_path, untar
+from ..streams import Stream, decode_output, demux, tar_path, untar
 from ..util import MANAGED, MANAGED_KEY, clip, compact, docker_time, project, q, split_cp, to_unix
 from .images import Images
 
@@ -41,6 +43,25 @@ def summarize_stats(s: dict[str, Any]) -> dict[str, Any]:
         "block": {op_: sum(b["value"] for b in blk if b.get("op", "").lower() == op_) for op_ in ("read", "write")},
         "pids": (s.get("pids_stats") or {}).get("current"),
     }
+
+
+@dataclass(frozen=True, slots=True)
+class ExecResult:
+    code: int | None
+    out: bytes
+    err: bytes
+
+    @property
+    def ok(self) -> bool:
+        return self.code in (0, None)  # None only in dry-run
+
+    @property
+    def stdout(self) -> str:
+        return self.out.decode(errors="replace")
+
+    @property
+    def stderr(self) -> str:
+        return self.err.decode(errors="replace")
 
 
 def port_open(spec: str, timeout: float = 1.0) -> bool:
@@ -355,14 +376,29 @@ class Containers(Resource, name="containers"):
         """Run a command in a running container; returns exit code and output."""
         if not cmd:
             raise ValueError("exec needs a command, e.g. `aisb containers exec web -- ls /`")
+        chunks: list[bytes] = []
+        code = self.stream_in(ref, list(cmd), chunks.append, stderr=chunks.append, env=env, user=user, workdir=workdir)
+        return {"exit_code": code, **clip(b"".join(chunks).decode(errors="replace"), max_bytes)}
+
+    def stream_in(self, ref: str, argv: list[str], stdout: Callable[[bytes], object], *,
+                  stderr: Callable[[bytes], object] | None = None, env: list[str] | None = None,
+                  user: str | None = None, workdir: str | None = None) -> int | None:
+        """Run argv inside the container, feeding output chunks to callbacks as they arrive; returns the exit code."""
         created = self.t.json("POST", f"/containers/{q(ref)}/exec", body=compact({
-            "Cmd": list(cmd), "AttachStdout": True, "AttachStderr": True,
-            "WorkingDir": workdir, "User": user, "Env": env,
+            "Cmd": argv, "AttachStdout": True, "AttachStderr": True, "WorkingDir": workdir, "User": user, "Env": env,
         }))
         eid = created["Id"]
-        raw = self.t.raw("POST", f"/exec/{eid}/start", body={"Detach": False, "Tty": False}, timeout=None)
-        code = (self.t.json("GET", f"/exec/{eid}/json") or {}).get("ExitCode")
-        return {"exit_code": code, **clip(decode_output(raw, False), max_bytes)}
+        chunks = self.t.stream("POST", f"/exec/{eid}/start", body={"Detach": False, "Tty": False}, timeout=None)
+        for kind, data in demux(chunks):
+            (stderr or stdout)(data) if kind is Stream.STDERR else stdout(data)
+        return (self.t.json("GET", f"/exec/{eid}/json") or {}).get("ExitCode")
+
+    def run_in(self, ref: str, argv: list[str], *, env: list[str] | None = None, user: str | None = None,
+               workdir: str | None = None) -> "ExecResult":
+        """Run argv inside the container and capture stdout and stderr separately."""
+        out, err = bytearray(), bytearray()
+        code = self.stream_in(ref, argv, out.extend, stderr=err.extend, env=env, user=user, workdir=workdir)
+        return ExecResult(code, bytes(out), bytes(err))
 
     @op(Tier.MUTATE)
     def cp(self, src: Annotated[str, "CONTAINER:PATH or local path"],

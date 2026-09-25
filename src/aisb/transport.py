@@ -3,6 +3,7 @@
 import http.client
 import json
 import os
+import re
 import socket
 import ssl
 from collections.abc import Iterator, Mapping
@@ -78,6 +79,15 @@ def _tls_context(cert_path: str | None) -> ssl.SSLContext:
     return ctx
 
 
+SECRET_KEY = re.compile(r"PASS|SECRET|TOKEN|AUTH|CREDENTIAL|PRIVATE|(?:^|_)KEY$", re.I)
+
+
+def redact_env(env: list[str]) -> list[str]:
+    """Mask the values of secret-looking KEY=VALUE entries."""
+    return [f"{k}=***" if SECRET_KEY.search(k) and sep else f"{k}{sep}{v}"
+            for k, sep, v in (e.partition("=") for e in env)]
+
+
 def _query_value(v: Any) -> str:
     if isinstance(v, bool):
         return "true" if v else "false"
@@ -112,10 +122,22 @@ class Request:
         if query := {k: v for k, v in self.query.items() if v is not None}:
             out["query"] = query
         if self.body is not None:
-            out["body"] = self.body
+            body = self.body
+            if isinstance(body, dict) and isinstance(body.get("Env"), list):
+                body = {**body, "Env": redact_env(body["Env"])}
+            out["body"] = body
         elif self.data is not None:
             out["body"] = f"<{len(self.data)} bytes {self.content_type}>"
         return out
+
+
+@dataclass(frozen=True, slots=True)
+class Note:
+    """A side effect outside the Docker API (e.g. an HTTP call to a container) recorded during dry-run."""
+    data: dict[str, Any]
+
+    def preview(self) -> dict[str, Any]:
+        return self.data
 
 
 def _message(raw: bytes) -> str:
@@ -132,7 +154,7 @@ class Transport:
         self.endpoint = endpoint
         self.timeout = timeout
         self._version = version
-        self._plan: list[Request] | None = None
+        self._plan: list[Request | Note] | None = None
 
     @property
     def version(self) -> str:
@@ -143,7 +165,7 @@ class Transport:
         return self._version
 
     @contextmanager
-    def dry_run(self) -> Iterator[list[Request]]:
+    def dry_run(self) -> Iterator[list[Request | Note]]:
         """Record mutating requests instead of sending them; reads still execute."""
         prev, self._plan = self._plan, []
         try:
@@ -155,6 +177,11 @@ class Transport:
     def planning(self) -> bool:
         """True inside dry_run(): ops may run extra read-only preflight checks."""
         return self._plan is not None
+
+    def note(self, **data: Any) -> None:
+        """Record a non-Docker side effect in the dry-run plan."""
+        if self._plan is not None:
+            self._plan.append(Note(data))
 
     def _intercept(self, req: Request) -> bool:
         if self._plan is None or (req.method == "GET" and DRY_ID not in req.path):
@@ -204,6 +231,12 @@ class Transport:
             return b""
         with self._open(req, timeout=timeout) as resp:
             return resp.read()
+
+    def head(self, path: str, *, query: Mapping[str, Any] | None = None) -> dict[str, str]:
+        """HEAD request; returns response headers (e.g. archive path stat)."""
+        with self._open(self._req("HEAD", path, query, None, None, None)) as resp:
+            resp.read()
+            return {k.lower(): v for k, v in resp.getheaders()}
 
     def stream(self, method: str, path: str, *, query: Mapping[str, Any] | None = None, body: Any = None,
                data: bytes | None = None, content_type: str | None = None, timeout: Timeout = ...) -> Iterator[bytes]:

@@ -31,6 +31,27 @@ d.containers.run("alpine", "echo", "hi", rm=True)  # {'id': ..., 'exit_code': 0,
 
 The analysis lives in the pure `aisb.insights` package (`fingerprint`, `diagnose`, `compare`), so it can be tested and reused without a daemon.
 
+## Services inside containers
+
+No host clients and no credential hunting: `aisb` detects the service, reads credentials from the container env (`*_FILE` secrets included), and runs the service's own CLI inside the container.
+
+```bash
+aisb svc list                                   # what runs where + host connection URLs (secrets masked)
+aisb svc ready pg                               # SELECT 1 succeeds and init is finished, not just "a log line appeared"
+aisb db query pg "select * from orders limit 5" --format table   # read-only, enforced by the server
+aisb db exec pg --file migration.sql --dry-run  # write path, previewable, secrets redacted
+aisb db activity pg                             # running queries, blockers, locks, cache hit ratio
+aisb db dump pg backup.sql.gz                   # streamed and gzipped on the host
+aisb db query app "select * from users" --path /data/app.db    # SQLite, no sqlite3 needed in the image
+aisb redis scan cache 'session:*'               # SCAN + type/TTL/memory in one Lua round trip
+aisb mongo find mdb users '{"age": {"$gt": 30}}' --format table
+aisb svc reload web                             # nginx -t first; refuses to reload a broken config
+aisb http get api /health                       # published port or container IP resolved for you
+aisb fs cat distroless-app /app/config.yaml     # works without a shell in the image
+```
+
+Adapters (`aisb.services`) register with `@register`, so a new engine is a class with `image_rx`, credentials, and the methods it supports.
+
 ## Design
 
 ```
@@ -40,6 +61,7 @@ models.py      compact dataclass views + RunSpec (declarative container config -
 ops.py         @op(Tier) registry: CLI flags, JSON schemas, docs and safety policy come from one declaration
 api/*.py       containers, images, networks, volumes, system
 insights/      pure analysis: log fingerprinting, rule-based triage, snapshot diffs
+services/      adapters for software inside containers: postgres, mysql/mariadb, sqlite, redis, mongo, web servers
 cli.py         argparse generated from the registry; JSON on stdout; exit codes 0/1/2/3/4
 ```
 

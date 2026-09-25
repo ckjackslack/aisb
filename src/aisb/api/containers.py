@@ -1,11 +1,15 @@
+import re
 import shlex
+import socket
+import time
 from typing import Annotated, Any, Literal
 
+from .. import insights
 from ..errors import NotFound, NotModified
-from ..models import Container, RunSpec
+from ..models import Container, RunSpec, parse_port
 from ..ops import Resource, Tier, op
 from ..streams import decode_output, tar_path, untar
-from ..util import MANAGED, MANAGED_KEY, clip, compact, project, q, split_cp, to_unix
+from ..util import MANAGED, MANAGED_KEY, clip, compact, docker_time, project, q, split_cp, to_unix
 from .images import Images
 
 Ref = Annotated[str, "container name or id"]
@@ -37,6 +41,15 @@ def summarize_stats(s: dict[str, Any]) -> dict[str, Any]:
         "block": {op_: sum(b["value"] for b in blk if b.get("op", "").lower() == op_) for op_ in ("read", "write")},
         "pids": (s.get("pids_stats") or {}).get("current"),
     }
+
+
+def port_open(spec: str, timeout: float = 1.0) -> bool:
+    host, _, port = spec.rpartition(":")
+    try:
+        with socket.create_connection((host or "127.0.0.1", int(port)), timeout=timeout):
+            return True
+    except (OSError, ValueError):
+        return False
 
 
 def _ports(bindings: dict[str, Any] | None, exposed: dict[str, Any] | None) -> list[str]:
@@ -101,19 +114,153 @@ class Containers(Resource, name="containers"):
         """Dump an existing container's config as RunSpec JSON (edit, then `run --spec` to recreate)."""
         return runspec_of(self.t.json("GET", f"/containers/{q(ref)}/json"))
 
+    def _text(self, ref: str, *, tail: int = 0, since: str | None = None, until: str | None = None,
+              stream: str = "all", timestamps: bool = False, tty: bool | None = None) -> str:
+        if tty is None:
+            tty = bool((self.t.json("GET", f"/containers/{q(ref)}/json") or {}).get("Config", {}).get("Tty"))
+        raw = self.t.raw("GET", f"/containers/{q(ref)}/logs", query={
+            "stdout": stream != "stderr", "stderr": stream != "stdout", "tail": tail or "all",
+            "since": since and to_unix(since), "until": until and to_unix(until), "timestamps": timestamps,
+        })
+        return decode_output(raw, tty)
+
     @op(Tier.READ)
     def logs(self, ref: Ref, *, tail: Annotated[int, "lines from the end; 0 = all"] = 200,
              since: Annotated[str | None, "unix ts, ISO time, or relative like 10m"] = None,
              until: Annotated[str | None, "unix ts, ISO time, or relative like 1m"] = None,
              stream: Literal["all", "stdout", "stderr"] = "all",
-             timestamps: bool = False, max_bytes: MaxBytes = 64 * 1024) -> dict[str, Any]:
-        """Container logs, stdout and stderr interleaved."""
-        tty = bool((self.t.json("GET", f"/containers/{q(ref)}/json") or {}).get("Config", {}).get("Tty"))
-        raw = self.t.raw("GET", f"/containers/{q(ref)}/logs", query={
-            "stdout": stream != "stderr", "stderr": stream != "stdout", "tail": tail or "all",
-            "since": since and to_unix(since), "until": until and to_unix(until), "timestamps": timestamps,
-        })
-        return clip(decode_output(raw, tty), max_bytes)
+             timestamps: bool = False,
+             grep: Annotated[str | None, "only lines matching this regex (numbered, like grep -n)"] = None,
+             context: Annotated[int, "lines of context around --grep matches"] = 0,
+             max_bytes: MaxBytes = 64 * 1024) -> dict[str, Any]:
+        """Container logs, stdout and stderr interleaved; --grep filters with context."""
+        text = self._text(ref, tail=tail, since=since, until=until, stream=stream, timestamps=timestamps)
+        return clip(insights.grep(text.splitlines(), grep, context) if grep else text, max_bytes)
+
+    @op(Tier.READ)
+    def patterns(self, ref: Ref, *, tail: Annotated[int, "lines to analyse; 0 = all"] = 5000,
+                 since: Annotated[str | None, "unix ts, ISO time, or relative like 1h"] = None,
+                 top: Annotated[int, "max templates returned"] = 20,
+                 level: Annotated[Literal["other", "debug", "info", "warn", "error"], "minimum level shown"] = "other",
+                 ) -> dict[str, Any]:
+        """Fingerprint logs into ranked templates (errors first) and flag patterns that only appeared at the end."""
+        lines = self._text(ref, tail=tail, since=since).splitlines()
+        return insights.fingerprint(lines, top=top, min_level=level)
+
+    @op(Tier.READ, name="wait")
+    def wait_for(self, ref: Ref, *, running: Annotated[bool, "running and not restarting"] = False,
+                 healthy: Annotated[bool, "healthcheck reports healthy"] = False,
+                 exited: Annotated[bool, "container has stopped"] = False,
+                 log: Annotated[str | None, "regex a log line (since the last start) must match"] = None,
+                 port: Annotated[str | None, "[host:]port accepting TCP connections"] = None,
+                 within: Annotated[float, "give up after N seconds"] = 60.0,
+                 interval: Annotated[float, "poll interval in seconds"] = 1.0) -> dict[str, Any]:
+        """Block until every given condition holds (default: --running). Fails fast if the container dies or turns unhealthy."""
+        if not (running or healthy or exited or log or port):
+            running = True
+        try:
+            rx = re.compile(log) if log else None
+        except re.error as e:
+            raise ValueError(f"invalid --log regex: {e}") from None
+        begin = time.monotonic()
+        deadline = begin + within
+        while True:
+            info = self.t.json("GET", f"/containers/{q(ref)}/json")
+            st = info.get("State") or {}
+            health = (st.get("Health") or {}).get("Status")
+            if healthy and health is None:
+                raise ValueError(f"{ref} has no healthcheck; wait for --log or --port instead")
+            met: dict[str, bool] = {}
+            matched = None
+            if running:
+                met["running"] = bool(st.get("Running")) and not st.get("Restarting")
+            if healthy:
+                met["healthy"] = health == "healthy"
+            if exited:
+                met["exited"] = st.get("Status") in ("exited", "dead")
+            if rx:
+                started = docker_time(st.get("StartedAt"))
+                text = self._text(ref, since=str(int(started)) if started else None)
+                matched = next((line for line in text.splitlines() if rx.search(line)), None)
+                met["log"] = matched is not None
+            if port:
+                met["port"] = port_open(port)
+            elapsed = round(time.monotonic() - begin, 2)
+            if all(met.values()):
+                return {"ok": True, "elapsed": elapsed, "conditions": met, **({"matched": matched} if matched else {})}
+            died = not exited and (st.get("Status") in ("exited", "dead") or st.get("Restarting"))
+            reason = ("container stopped (exit code {})".format(st.get("ExitCode")) if died
+                      else "healthcheck reports unhealthy" if healthy and health == "unhealthy"
+                      else f"timed out after {within}s" if time.monotonic() >= deadline else None)
+            if reason:
+                last = ((st.get("Health") or {}).get("Log") or [{}])[-1].get("Output")
+                return {"ok": False, "reason": reason, "elapsed": elapsed, "conditions": met,
+                        "state": st.get("Status"), "exit_code": st.get("ExitCode"),
+                        **({"health_output": str(last).strip()[-500:]} if last else {}),
+                        "log_tail": clip(self._text(ref, tail=20), 4096)["output"]}
+            time.sleep(max(0.0, min(interval, deadline - time.monotonic())))
+
+    @op(Tier.READ)
+    def doctor(self, ref: Ref, *, tail: Annotated[int, "log lines to scan"] = 500,
+               stats: Annotated[bool, "sample CPU/memory if running (~1s)"] = True) -> dict[str, Any]:
+        """One-shot triage: verdict, ranked findings with evidence, and the next commands to run."""
+        info = self.t.json("GET", f"/containers/{q(ref)}/json")
+        lines = tuple(self._text(ref, tail=tail, tty=bool((info.get("Config") or {}).get("Tty"))).splitlines())
+        running = (info.get("State") or {}).get("Running")
+        facts = insights.Facts(
+            name=(info.get("Name") or ref).lstrip("/"), inspect=info, logs=lines,
+            image_id=self._image_id((info.get("Config") or {}).get("Image")),
+            stats=self.stats(ref) if stats and running else None,
+            peers=self.names(),
+        )
+        report = insights.diagnose(facts)
+        report["log_patterns"] = [
+            {k: p[k] for k in ("level", "count", "template")}
+            for p in insights.fingerprint(lines, top=5, min_level="warn")["top"]
+        ]
+        return report
+
+    def names(self) -> frozenset[str]:
+        rows = self.t.json("GET", "/containers/json", query={"all": True}) or []
+        return frozenset(n.lstrip("/") for r in rows for n in r.get("Names") or [])
+
+    def _exists(self, path: str) -> bool:
+        try:
+            self.t.json("GET", path)
+            return True
+        except NotFound:
+            return False
+
+    def preflight(self, s: RunSpec, *, pull: bool = True) -> list[str]:
+        """Read-only checks that predict a create/start failure; run during --dry-run."""
+        warnings = []
+        if s.name and self._exists(f"/containers/{q(s.name)}/json"):
+            warnings.append(f"a container named {s.name!r} already exists: create would fail with 409 (remove or rename it)")
+        if s.network and s.network not in ("bridge", "host", "none") and not s.network.startswith("container:") \
+                and not self._exists(f"/networks/{q(s.network)}"):
+            warnings.append(f"network {s.network!r} does not exist (aisb networks create {s.network})")
+        if not self._exists(f"/images/{q(s.image)}/json"):
+            warnings.append(f"image {s.image!r} is not local: " + ("it will be pulled" if pull else "and --no-pull is set"))
+        for v in s.volumes:
+            src = v.split(":")[0]
+            if ":" in v and not src.startswith(("/", ".", "~")) and not self._exists(f"/volumes/{q(src)}"):
+                warnings.append(f"volume {src!r} does not exist: Docker will create it empty")
+        wanted = {b["HostPort"] for p in s.ports if (b := parse_port(p)[1]) and b["HostPort"]}
+        if wanted:
+            for row in self.t.json("GET", "/containers/json") or []:
+                clash = wanted & {str(p.get("PublicPort")) for p in row.get("Ports") or []}
+                for port in sorted(clash):
+                    name = (row.get("Names") or ["?"])[0].lstrip("/")
+                    warnings.append(f"host port {port} is already published by running container {name!r}")
+        return warnings
+
+    def _image_id(self, image: str | None) -> str | None:
+        if not image or image.startswith("sha256:"):
+            return None
+        try:
+            return (self.t.json("GET", f"/images/{q(image)}/json") or {}).get("Id")
+        except NotFound:
+            return None
 
     @op(Tier.READ)
     def top(self, ref: Ref) -> list[dict[str, str]]:
@@ -124,7 +271,10 @@ class Containers(Resource, name="containers"):
     @op(Tier.READ)
     def stats(self, ref: Ref) -> dict[str, Any]:
         """One-shot resource usage: CPU %, memory, network, block IO, pids."""
-        return summarize_stats(self.t.json("GET", f"/containers/{q(ref)}/stats", query={"stream": False}))
+        raw = self.t.json("GET", f"/containers/{q(ref)}/stats", query={"stream": False}) or {}
+        if str(raw.get("read", "")).startswith("0001-"):  # the daemon's zero-filled answer for a stopped container
+            return {"running": False, "note": "container is not running; no live stats"}
+        return summarize_stats(raw)
 
     @op(Tier.READ)
     def diff(self, ref: Ref) -> list[dict[str, str]]:
@@ -157,6 +307,7 @@ class Containers(Resource, name="containers"):
                        workdir=workdir, user=user, memory=memory, cpus=cpus, entrypoint=entrypoint,
                        tty=tty, rm=rm, health_cmd=health_cmd)
         body = s.to_api(auto_remove=s.rm and detach)
+        warn = {"warnings": w} if self.t.planning and (w := self.preflight(s, pull=pull)) else {}
         create = lambda: self.t.json("POST", "/containers/create", query={"name": s.name}, body=body)  # noqa: E731
         try:
             cid = create()["Id"]
@@ -167,12 +318,12 @@ class Containers(Resource, name="containers"):
             cid = create()["Id"]
         self.t.json("POST", f"/containers/{cid}/start")
         if detach:
-            return {"id": cid[:12], "name": s.name, "status": "started"}
+            return {"id": cid[:12], "name": s.name, "status": "started", **warn}
         status = self.t.json("POST", f"/containers/{cid}/wait", timeout=None) or {}
         out = self.logs(cid, tail=0, max_bytes=max_bytes)
         if s.rm:
             self.t.json("DELETE", f"/containers/{cid}", query={"force": True})
-        return {"id": cid[:12], "exit_code": status.get("StatusCode"), **out}
+        return {"id": cid[:12], "exit_code": status.get("StatusCode"), **out, **warn}
 
     def _act(self, ref: str, action: str, grace: int | None = None) -> dict[str, Any]:
         try:

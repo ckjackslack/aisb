@@ -188,11 +188,12 @@ class Outcome:
     status: Literal["ok", "dry-run", "confirm"]
     result: Any = None
     planned: list[dict[str, Any]] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
     def payload(self) -> Any:
         if self.status == "ok":
             return self.result
-        return {"status": self.status, "planned": self.planned}
+        return {"status": self.status, "planned": self.planned, **({"warnings": self.warnings} if self.warnings else {})}
 
 
 def invoke(client: HasResources, op_: Op, kwargs: Mapping[str, Any], *,
@@ -202,8 +203,9 @@ def invoke(client: HasResources, op_: Op, kwargs: Mapping[str, Any], *,
     if not preview:
         return Outcome("ok", op_.call(client, kwargs))
     with client.transport.dry_run() as planned:
-        op_.call(client, kwargs)
-    return Outcome("dry-run" if dry_run else "confirm", planned=[r.preview() for r in planned])
+        result = op_.call(client, kwargs)
+    warnings = list(result.get("warnings") or []) if isinstance(result, Mapping) else []
+    return Outcome("dry-run" if dry_run else "confirm", planned=[r.preview() for r in planned], warnings=warnings)
 
 
 def jsonable(obj: Any) -> Any:

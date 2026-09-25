@@ -151,6 +151,11 @@ class Transport:
         finally:
             self._plan = prev
 
+    @property
+    def planning(self) -> bool:
+        """True inside dry_run(): ops may run extra read-only preflight checks."""
+        return self._plan is not None
+
     def _intercept(self, req: Request) -> bool:
         if self._plan is None or (req.method == "GET" and DRY_ID not in req.path):
             return False

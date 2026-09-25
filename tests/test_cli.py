@@ -145,3 +145,101 @@ def test_runtime_imports_are_stdlib_only():
             "print('\\n'.join(sorted({m.split('.')[0] for m in sys.modules})))")
     mods = set(subprocess.run([sys.executable, "-S", "-E", "-c", code], capture_output=True, text=True, check=True).stdout.split())
     assert mods - set(sys.stdlib_module_names) - {"aisb", "__main__"} == set()
+
+
+# --- power tools -----------------------------------------------------------------------------
+
+def _inspect(**state):
+    return {"Name": "/web", "Image": "sha256:" + "a" * 64, "RestartCount": 0,
+            "Config": {"Image": "web:1", "Env": [], "Tty": False},
+            "HostConfig": {}, "State": {"Status": "running", "Running": True, "ExitCode": 0,
+                                        "StartedAt": "2026-09-25T10:00:00.123456789Z"} | state}
+
+
+def test_wait_polls_until_healthy_and_log_matches(cli, daemon):
+    states = iter([{"Health": {"Status": "starting"}}] * 2 + [{"Health": {"Status": "healthy"}}] * 10)
+    daemon.on("GET", "/containers/web/json", lambda s: Reply(json=_inspect(**next(states))))
+    daemon.on("GET", "/containers/web/logs", Reply(body=frame(1, b"boot\nready to accept connections\n")))
+    code, out, _ = cli("containers", "wait", "web", "--healthy", "--log", r"ready to \w+", "--interval", "0.01")
+    assert code == EXIT_OK
+    assert out | {"elapsed": 0} == {"ok": True, "elapsed": 0, "conditions": {"healthy": True, "log": True},
+                                    "matched": "ready to accept connections"}
+    logs = [s for s in daemon.seen if s.path.endswith("/logs")]
+    assert logs[0].query["since"] == "1790330400"  # StartedAt, nanoseconds trimmed
+
+
+def test_wait_fails_fast_when_container_dies(cli, daemon):
+    daemon.on("GET", "/containers/web/json", json=_inspect(Status="exited", Running=False, ExitCode=3))
+    daemon.on("GET", "/containers/web/logs", Reply(body=frame(2, b"boom\n")))
+    code, out, _ = cli("containers", "wait", "web", "--within", "30")
+    assert code == 4
+    assert (out["ok"], out["reason"], out["log_tail"]) == (False, "container stopped (exit code 3)", "boom\n")
+    assert out["elapsed"] < 1
+
+
+def test_wait_times_out(cli, daemon):
+    daemon.on("GET", "/containers/web/json", json=_inspect(Running=False, Status="created"))
+    daemon.on("GET", "/containers/web/logs", Reply(body=b""))
+    code, out, _ = cli("containers", "wait", "web", "--within", "0.05", "--interval", "0.01")
+    assert (code, out["reason"]) == (4, "timed out after 0.05s")
+
+
+def test_wait_healthy_without_healthcheck_is_usage_error(cli, daemon):
+    daemon.on("GET", "/containers/web/json", json=_inspect())
+    assert cli("containers", "wait", "web", "--healthy")[0] == EXIT_USAGE
+
+
+def test_containers_doctor_end_to_end(cli, daemon):
+    daemon.on("GET", "/containers/web/json", json=_inspect(Status="exited", Running=False, ExitCode=1))
+    daemon.on("GET", "/containers/web/logs", Reply(body=frame(2, b"ERROR bind: address already in use\n")))
+    daemon.on("GET", "/images/web:1/json", json={"Id": "sha256:" + "b" * 64})
+    daemon.on("GET", "/containers/json", json=[{"Names": ["/web"]}])
+    code, out, _ = cli("containers", "doctor", "web")
+    assert code == EXIT_OK and (out["verdict"], out["likely_cause"]) == ("failing", "port-in-use")
+    assert [f["code"] for f in out["findings"]] == ["port-in-use", "stale-image", "app-error", "no-restart-policy"]
+    assert out["log_patterns"] == [{"level": "error", "count": 1, "template": "ERROR bind: address already in use"}]
+    assert not any("/stats" in s.path for s in daemon.seen)  # not running -> no stats sample
+
+
+def test_system_doctor_ranks_worst_first(cli, daemon):
+    rows = [{"Id": c * 64} for c in "12"]
+    daemon.on("GET", "/containers/json", json=rows)
+    daemon.on("GET", "/images/json", json=[{"Id": "sha256:" + "a" * 64, "RepoTags": ["web:1"]}])
+    daemon.on("GET", "/containers/1+/json", json=_inspect() | {"Name": "/ok"})
+    daemon.on("GET", "/containers/2+/json", json=_inspect(Status="exited", Running=False, ExitCode=1,
+                                                          OOMKilled=True) | {"Name": "/bad"})
+    daemon.on("GET", "/containers/1+/logs", Reply(body=frame(1, b"ok\n")))
+    daemon.on("GET", "/containers/2+/logs", Reply(body=frame(2, b"java.lang.OutOfMemoryError: heap\n")))
+    code, out, _ = cli("system", "doctor")
+    assert code == EXIT_OK
+    assert out["summary"] == {"failing": 1, "degraded": 0, "healthy": 1}
+    assert out["problems"][0]["container"] == "bad" and out["healthy"] == ["ok"]
+    assert out["problems"][0]["likely_cause"] == "oom-killed"
+    assert any("memory-exhausted" in f for f in out["problems"][0]["findings"])
+    assert out["next"] == ["aisb containers doctor bad"]
+
+
+def test_system_changes_against_live_state(cli, daemon, tmp_path):
+    before = tmp_path / "before.json"
+    before.write_text(json.dumps({"aisb_snapshot": 1, "taken": 1, "containers": {}, "images": {},
+                                  "volumes": {}, "networks": {}}))
+    daemon.on("GET", "/containers/json", json=[{"Id": CID, "Names": ["/web"], "Image": "web:1", "State": "running"}])
+    daemon.on("GET", "/images/json", json=[])
+    daemon.on("GET", "/volumes", json={"Volumes": [{"Name": "data"}]})
+    daemon.on("GET", "/networks", json=[])
+    code, out, _ = cli("system", "changes", str(before))
+    assert code == EXIT_OK
+    assert (out["containers"]["added"], out["volumes"]["added"]) == (["web"], ["data"])
+    assert out["cleanup"] == ["aisb containers rm web --force --dry-run", "aisb volumes rm data --dry-run"]
+
+
+def test_logs_grep(cli, daemon):
+    daemon.on("GET", "/containers/web/json", json={"Config": {"Tty": True}})
+    daemon.on("GET", "/containers/web/logs", Reply(body=b"a\nERROR x\nb\nc\nERROR y\n"))
+    code, out, _ = cli("containers", "logs", "web", "--grep", "ERROR", "--context", "1")
+    assert out["output"] == "1:a\n2:ERROR x\n3:b\n4:c\n5:ERROR y\n"
+
+
+def test_stats_on_stopped_container(cli, daemon):
+    daemon.on("GET", "/containers/web/stats", json={"read": "0001-01-01T00:00:00Z", "cpu_stats": {}})
+    assert cli("containers", "stats", "web")[1] == {"running": False, "note": "container is not running; no live stats"}

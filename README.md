@@ -18,6 +18,19 @@ d = Docker()  # $DOCKER_HOST or the local socket
 d.containers.run("alpine", "echo", "hi", rm=True)  # {'id': ..., 'exit_code': 0, 'output': 'hi\n', ...}
 ```
 
+## Power tools
+
+| Command | What it does |
+|---|---|
+| `aisb containers doctor web` | One-shot triage: verdict plus ranked findings with evidence and next commands. Pluggable `@rule`s cover exit codes, OOM, crash loops, healthchecks, start errors, log signatures (missing env var, refused dependency, DNS, port in use, permissions, wrong architecture, TLS, auth), stale image, and risky config. |
+| `aisb system doctor` | Fleet triage across every container, worst first. |
+| `aisb containers patterns web` | Log fingerprinting: masks timestamps, UUIDs, IPs and numbers, clusters lines into templates ranked by severity and count, and flags patterns that emerged at the end. |
+| `aisb containers logs web --grep ERR --context 2` | Numbered `grep -C` over the log window. |
+| `aisb containers wait web --healthy --log ready --port 8080` | Waits until every condition holds. Fails fast on death or unhealthy; exit 4 when not met. |
+| `aisb system snapshot` / `system changes before.json` | Before/after inventory diff with dry-run cleanup commands. |
+
+The analysis lives in the pure `aisb.insights` package (`fingerprint`, `diagnose`, `compare`), so it can be tested and reused without a daemon.
+
 ## Design
 
 ```
@@ -26,7 +39,8 @@ streams.py     multiplexed stdout/stderr demux, JSON-stream decoder, tar context
 models.py      compact dataclass views + RunSpec (declarative container config -> API body)
 ops.py         @op(Tier) registry: CLI flags, JSON schemas, docs and safety policy come from one declaration
 api/*.py       containers, images, networks, volumes, system
-cli.py         argparse generated from the registry; JSON on stdout; exit codes 0/1/2/3
+insights/      pure analysis: log fingerprinting, rule-based triage, snapshot diffs
+cli.py         argparse generated from the registry; JSON on stdout; exit codes 0/1/2/3/4
 ```
 
 Every operation carries a **tier**:

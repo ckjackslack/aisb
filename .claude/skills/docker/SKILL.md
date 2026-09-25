@@ -27,8 +27,25 @@ Commands for `run` / `exec` always go **after `--`**:
 | 1 | Docker error; `{"error","message","status"}` on stderr | read `message`; 404 = wrong name, 409 = conflict/state |
 | 2 | usage error | fix the arguments |
 | 3 | **confirmation required**; planned requests on stdout | show the plan to the user, then stop and ask |
+| 4 | condition not met (`"ok": false`, e.g. `wait`) | read `reason` and `log_tail`, then run `doctor` |
 
 Endpoint comes from `--host` or `$DOCKER_HOST`, falling back to the local socket. Run `aisb system ping` first if unsure.
+
+## Power tools: reach for these first
+
+| Instead of | Use | Why |
+|---|---|---|
+| inspect + logs + events + stats by hand | `aisb containers doctor NAME` | One call returns a verdict, ranked findings with evidence, and the exact next commands. |
+| checking containers one by one | `aisb system doctor` | Triages every container, worst first. The start of any "what's wrong with my Docker?" |
+| reading hundreds of log lines | `aisb containers patterns NAME` | Clusters lines into templates, errors first. `emerging` shows what first appeared at the end, right before a crash. |
+| `logs` and scanning by eye | `aisb containers logs NAME --grep REGEX --context 2` | Numbered matches only. It searches the `--tail` window, 200 lines by default; use `--tail 0` for the whole log. |
+| `sleep 10` and hoping | `aisb containers wait NAME --healthy / --log REGEX / --port 8080 / --exited --within 60` | All given conditions must hold. It returns early if the container dies or turns unhealthy, with the reason and log tail. **Exit 4** means the condition was not met. |
+| guessing what you changed | `aisb system snapshot > before.json`, then `aisb system changes before.json` | Before/after diff of containers, images, volumes and networks, plus dry-run cleanup commands for exactly what was added. |
+
+Doctor findings are **leads, not proof**. `likely_cause` is the top cause-type finding; symptoms like `crash-loop` rank below causes. Quote the evidence, and confirm a surprising finding with a targeted read before acting on it.
+`patterns` also reports `numbers` (per-slot first/last/min/max with `trend`: a latency climb) and `repeated_ids` (the same UUID or IP recurring: retries or one hot key).
+Every `--dry-run` of `run` includes preflight `warnings` (name in use, missing network or volume, image not local, host port taken). Read them before executing.
+Before a session that will create or change things, take a snapshot so you can report and clean up precisely.
 
 ## Safety rules (non-negotiable)
 

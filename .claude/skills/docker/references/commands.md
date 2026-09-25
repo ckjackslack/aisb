@@ -12,7 +12,10 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | list | read | `aisb containers list [--all] [--label LABEL]... [--managed]` | List containers (running only unless --all). |
 | inspect | read | `aisb containers inspect REF [--fields FIELDS]` | Low-level container details; narrow with --fields. |
 | spec | read | `aisb containers spec REF` | Dump an existing container's config as RunSpec JSON (edit, then `run --spec` to recreate). |
-| logs | read | `aisb containers logs REF [--tail TAIL] [--since SINCE] [--until UNTIL] [--stream STREAM] [--timestamps] [--max-bytes MAX_BYTES]` | Container logs, stdout and stderr interleaved. |
+| logs | read | `aisb containers logs REF [--tail TAIL] [--since SINCE] [--until UNTIL] [--stream STREAM] [--timestamps] [--grep GREP] [--context CONTEXT] [--max-bytes MAX_BYTES]` | Container logs, stdout and stderr interleaved; --grep filters with context. |
+| patterns | read | `aisb containers patterns REF [--tail TAIL] [--since SINCE] [--top TOP] [--level LEVEL]` | Fingerprint logs into ranked templates (errors first) and flag patterns that only appeared at the end. |
+| wait | read | `aisb containers wait REF [--running] [--healthy] [--exited] [--log LOG] [--port PORT] [--within WITHIN] [--interval INTERVAL]` | Block until every given condition holds (default: --running). Fails fast if the container dies or turns unhealthy. |
+| doctor | read | `aisb containers doctor REF [--tail TAIL] [--no-stats]` | One-shot triage: verdict, ranked findings with evidence, and the next commands to run. |
 | top | read | `aisb containers top REF` | Processes running inside the container. |
 | stats | read | `aisb containers stats REF` | One-shot resource usage: CPU %, memory, network, block IO, pids. |
 | diff | read | `aisb containers diff REF` | Filesystem changes relative to the image. |
@@ -65,4 +68,7 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | info | read | `aisb system info [--fields FIELDS]` | System-wide information; narrow with --fields. |
 | df | read | `aisb system df` | Disk usage summary with reclaimable bytes per object type. |
 | events | read | `aisb system events [--since SINCE] [--until UNTIL] [--filter FILTER]... [--limit LIMIT]` | Daemon events in a bounded time window. |
+| doctor | read | `aisb system doctor [--managed] [--tail TAIL]` | Fleet triage across every container, worst first: state, config, image, and recent log signatures. |
+| snapshot | read | `aisb system snapshot` | Inventory of containers, images, volumes and networks; save it and diff later with `system changes`. |
+| changes | read | `aisb system changes BEFORE [AFTER]` | What was added, removed, recreated or changed between two snapshots, with dry-run cleanup commands. |
 | prune | destroy | `aisb system prune [--no-containers] [--no-images] [--no-networks] [--volumes] [--all-images] [--managed] [--dry-run] [--yes]` | Remove unused objects. Volumes are opt-in. |

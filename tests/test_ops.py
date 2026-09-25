@@ -29,6 +29,13 @@ def test_every_op_is_documented_and_well_formed():
             assert inspect.Parameter.VAR_KEYWORD not in kinds
 
 
+def test_op_params_do_not_shadow_cli_globals():
+    reserved = {"host", "timeout", "json", "dry_run", "yes", "resource", "op", "_op"}
+    clashes = {(o.qualname, p.name) for ops in registry().values() for o in ops.values() for p in o.params
+               if p.name in reserved}
+    assert not clashes
+
+
 def test_destructive_ops_are_the_only_rm_like_ones():
     destroy = {o.qualname for ops in registry().values() for o in ops.values() if o.tier is Tier.DESTROY}
     assert destroy == {"containers.rm", "images.rmi", "networks.rm", "volumes.rm", "system.prune"}
@@ -78,7 +85,31 @@ def test_dry_run_plans_the_full_run_flow(client, daemon):
         ("GET", "/containers/dry-run-id/logs"), ("DELETE", "/containers/dry-run-id"),
     ]
     assert out.planned[0]["body"]["Labels"] == {"aisb.managed": "true"}
-    assert daemon.calls() == []
+    assert [m for m, _ in daemon.calls()] == ["GET"]  # only the read-only preflight reached the daemon
+    assert out.warnings == ["image 'alpine' is not local: it will be pulled"]
+
+
+def test_run_preflight_predicts_failures(client, daemon):
+    daemon.on("GET", "/containers/web/json", json={"Id": "x"})
+    daemon.on("GET", "/images/nginx/json", json={"Id": "sha256:1"})
+    daemon.on("GET", "/containers/json", json=[{"Names": ["/other"], "Ports": [{"PublicPort": 8080, "PrivatePort": 80}]}])
+    out = invoke(client, get_op("containers.run"), {
+        "image": "nginx", "name": "web", "network": "app-net", "volume": ["pgdata:/data", "/host:/h"],
+        "port": ["8080:80", "9090:90"], "detach": True}, dry_run=True)
+    assert out.warnings == [
+        "a container named 'web' already exists: create would fail with 409 (remove or rename it)",
+        "network 'app-net' does not exist (aisb networks create app-net)",
+        "volume 'pgdata' does not exist: Docker will create it empty",
+        "host port 8080 is already published by running container 'other'",
+    ]
+    assert out.payload()["warnings"] == out.warnings
+
+
+def test_real_run_skips_preflight(client, daemon):
+    daemon.on("POST", "/containers/create", status=201, json={"Id": "c" * 64})
+    daemon.on("POST", r"/containers/c+/start", status=204)
+    assert "warnings" not in get_op("containers.run").call(client, {"image": "nginx", "detach": True})
+    assert not [p for m, p in daemon.calls() if m == "GET"]
 
 
 def test_read_ops_ignore_dry_run(client, daemon):

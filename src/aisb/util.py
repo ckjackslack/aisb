@@ -33,11 +33,20 @@ def dig(data: Any, path: str) -> Any:
     return data
 
 
+def prune(value: Any) -> Any:
+    """Recursively drop None/''/[]/{} values: Docker pads nested objects with empty keys."""
+    if isinstance(value, Mapping):
+        return {k: v for k, v in ((k, prune(v)) for k, v in value.items()) if v not in (None, "", [], {})}
+    if isinstance(value, list):
+        return [prune(v) for v in value]
+    return value
+
+
 def project(data: Any, fields: str | None) -> Any:
-    """Keep only comma-separated dotted paths, e.g. 'State.Status,Config.Image'."""
+    """Keep only comma-separated dotted paths, e.g. 'State.Status,Config.Image'; nested empties are pruned."""
     if not fields:
         return data
-    return {f: dig(data, f) for f in (s.strip() for s in fields.split(",")) if f}
+    return {f: prune(dig(data, f)) for f in (s.strip() for s in fields.split(",")) if f}
 
 
 def clip(text: str, max_bytes: int) -> dict[str, Any]:
@@ -63,6 +72,14 @@ def to_unix(value: str | int | float, *, now: float | None = None) -> int:
         return int(v)
     dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     return int((dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).timestamp())
+
+
+def docker_time(value: str | None) -> float | None:
+    """Docker's RFC 3339 nanosecond timestamps -> unix seconds; None for the zero time."""
+    if not value or value.startswith("0001-"):
+        return None
+    trimmed = re.sub(r"(\.\d{6})\d+", r"\1", value.replace("Z", "+00:00"))
+    return datetime.fromisoformat(trimmed).timestamp()
 
 
 def kv(items: Iterable[str] | Mapping[str, str] | None) -> dict[str, str]:

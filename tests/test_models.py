@@ -91,6 +91,11 @@ def test_image_from_api_drops_none_tags():
     assert (img.id, img.tags) == ("b" * 12, [])
 
 
+def test_project_prunes_nested_empties():
+    data = {"Net": {"bridge": {"IPAddress": "172.17.0.2", "Links": None, "Aliases": [], "DriverOpts": {}}}, "Health": None}
+    assert project(data, "Net,Health") == {"Net": {"bridge": {"IPAddress": "172.17.0.2"}}, "Health": None}
+
+
 def test_project_and_dig():
     data = {"State": {"Status": "up", "Health": None}, "Mounts": [{"Source": "/s"}]}
     assert project(data, "State.Status, Mounts.0.Source,Nope.x") == {"State.Status": "up", "Mounts.0.Source": "/s", "Nope.x": None}

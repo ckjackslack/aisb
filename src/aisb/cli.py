@@ -1,19 +1,20 @@
 """`aisb RESOURCE OP [args]`: argparse generated from the operation registry.
 
-Exit codes: 0 ok, 1 Docker error, 2 usage error, 3 confirmation required, 130 interrupted.
+Exit codes: 0 ok, 1 Docker error, 2 usage error, 3 confirmation required,
+4 condition not met (a result with "ok": false, e.g. `containers wait`), 130 interrupted.
 """
 
 import argparse
 import json
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, TextIO
 
 from .client import Docker
 from .errors import DockerError
 from .ops import Op, Param, Tier, invoke, jsonable, registry, render_markdown
 
-EXIT_OK, EXIT_DOCKER, EXIT_USAGE, EXIT_CONFIRM = 0, 1, 2, 3
+EXIT_OK, EXIT_DOCKER, EXIT_USAGE, EXIT_CONFIRM, EXIT_UNMET = 0, 1, 2, 3, 4
 
 
 def _add_param(p: argparse.ArgumentParser, prm: Param) -> None:
@@ -100,11 +101,12 @@ def run(op_: Op, args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         return EXIT_USAGE
     if outcome.status == "confirm":
         emit({"status": "confirmation_required", "op": op_.qualname, "tier": str(op_.tier),
-              "planned": outcome.planned,
+              "planned": outcome.planned, **({"warnings": outcome.warnings} if outcome.warnings else {}),
               "hint": "Show this to the user; re-run with --yes only after they explicitly approve."}, True, out)
         return EXIT_CONFIRM
     emit(outcome.payload(), as_json, out)
-    return EXIT_OK
+    unmet = isinstance(outcome.result, Mapping) and outcome.result.get("ok") is False
+    return EXIT_UNMET if unmet else EXIT_OK
 
 
 def parse(argv: Sequence[str]) -> argparse.Namespace:

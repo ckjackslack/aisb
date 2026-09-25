@@ -1,5 +1,7 @@
 from typing import Annotated, Any
 
+from .. import insights
+from ..insights import snapshot as snap
 from ..ops import Resource, Tier, op
 from ..streams import iter_jsonl
 from ..util import MANAGED, filters, project, to_unix
@@ -78,6 +80,54 @@ class System(Resource, name="system"):
             if len(out) >= limit:
                 break
         return out
+
+    @op(Tier.READ)
+    def doctor(self, *, managed: Annotated[bool, "only containers created by aisb"] = False,
+               tail: Annotated[int, "log lines scanned per container; 0 = skip logs (faster)"] = 200) -> dict[str, Any]:
+        """Fleet triage across every container, worst first: state, config, image, and recent log signatures."""
+        from .containers import Containers
+        ctr = Containers(self.t)
+        rows = self.t.json("GET", "/containers/json", query={"all": True, "filters": {"label": [MANAGED]} if managed else None})
+        tags = {t: i["Id"] for i in self.t.json("GET", "/images/json") for t in i.get("RepoTags") or []}
+        peers = ctr.names() if managed else frozenset(n.lstrip("/") for r in rows for n in r.get("Names") or [])
+        reports = []
+        for row in rows:
+            info = self.t.json("GET", f"/containers/{row['Id']}/json")
+            cfg = info.get("Config") or {}
+            name = (info.get("Name") or row["Id"][:12]).lstrip("/")
+            logs = tuple(ctr._text(row["Id"], tail=tail, tty=bool(cfg.get("Tty"))).splitlines()) if tail else ()
+            reports.append(insights.diagnose(insights.Facts(name, info, logs=logs, image_id=tags.get(cfg.get("Image", "")),
+                                                            peers=peers)))
+        order = {"failing": 0, "degraded": 1, "healthy": 2}
+        reports.sort(key=lambda r: (order[r["verdict"]], r["container"]))
+        problems = [{"container": r["container"], "verdict": r["verdict"], "state": r["state"]["status"],
+                     "likely_cause": r["likely_cause"],
+                     "findings": [f"{f['severity']}:{f['code']}: {f['summary']}" for f in r["findings"]
+                                  if f["severity"] != "info"]}
+                    for r in reports if r["verdict"] != "healthy"]
+        return {
+            "scope": f"state, config, image{f', last {tail} log lines' if tail else ''}; no live stats",
+            "summary": {v: sum(r["verdict"] == v for r in reports) for v in order},
+            "problems": problems,
+            "healthy": [r["container"] for r in reports if r["verdict"] == "healthy"],
+            "next": [f"aisb containers doctor {p['container']}" for p in problems],
+        }
+
+    @op(Tier.READ)
+    def snapshot(self) -> dict[str, Any]:
+        """Inventory of containers, images, volumes and networks; save it and diff later with `system changes`."""
+        return snap.take(
+            self.t.json("GET", "/containers/json", query={"all": True}),
+            self.t.json("GET", "/images/json"),
+            (self.t.json("GET", "/volumes") or {}).get("Volumes") or [],
+            self.t.json("GET", "/networks"),
+        )
+
+    @op(Tier.READ)
+    def changes(self, before: Annotated[str, "snapshot JSON file (from `system snapshot`)"],
+                after: Annotated[str | None, "second snapshot file; default: live state now"] = None) -> dict[str, Any]:
+        """What was added, removed, recreated or changed between two snapshots, with dry-run cleanup commands."""
+        return snap.compare(snap.load(before), snap.load(after) if after else self.snapshot())
 
     @op(Tier.DESTROY)
     def prune(self, *, containers: Annotated[bool, "stopped containers"] = True,

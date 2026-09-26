@@ -153,3 +153,56 @@ def test_fs_reads_image_files_without_exec(docker, service):
     web = service("nginx:alpine")
     assert "worker_processes" in docker.fs.cat(web, "/etc/nginx/nginx.conf")["output"]
     assert any(e["path"] == "default.conf" for e in docker.fs.ls(web, "/etc/nginx/conf.d")["entries"])
+
+
+def test_stack_up_ready_and_down(docker, tmp_path):
+    for img in ("alpine:3.20", "redis:7-alpine"):
+        if not _has_image(docker, img):
+            pytest.skip(f"{img} not pulled")
+    name = f"it{uuid.uuid4().hex[:6]}"
+    f = tmp_path / "s.json"
+    f.write_text(json.dumps({"name": name, "services": {
+        "cache": {"image": "redis:7-alpine"},
+        "app": {"image": "alpine:3.20", "depends_on": ["cache"], "ready": {"log": "connected"},
+                "cmd": ["sh", "-c", "until nc -z cache 6379; do sleep 0.2; done; echo connected; sleep 60"]}}}))
+    try:
+        up = docker.stack.up(str(f), within=60)
+        assert up["ok"] and [s["service"] for s in up["services"]] == ["cache", "app"]
+        assert docker.stack.up(str(f))["services"][0]["action"] == "unchanged"
+        probe = docker.net.probe(f"{name}-app", "cache", port=6379)
+        assert probe["ok"], probe
+    finally:
+        down = docker.stack.down(name)
+    assert len(down["removed_containers"]) == 2 and down["removed_networks"] == [f"{name}_default"]
+
+
+def test_db_clone_and_diff(docker, service):
+    pg = service("postgres:16-alpine", env=["POSTGRES_PASSWORD=pw"])
+    assert docker.svc.ready(pg, within=90, stable=1)["ok"]
+    docker.db.exec_(pg, "create table t (id int primary key); insert into t select generate_series(1, 50)")
+    clone = f"{pg}-clone"
+    try:
+        assert docker.db.clone(pg, clone)["ok"]
+        docker.db.exec_(clone, "alter table t add column note text; delete from t where id > 40")
+        diff = docker.db.diff(pg, clone, counts=True)
+        assert diff["changed"]["public.t"]["columns"]["only_in_b"] == ["note"]
+        assert diff["row_counts"] == {"public.t": {"a": 50, "b": 40}}
+    finally:
+        docker.containers.rm(clone, force=True, volumes=True)
+
+
+def test_volume_backup_restore_roundtrip(docker, tmp_path):
+    if not _has_image(docker, "busybox:1.36"):
+        pytest.skip("busybox not pulled")
+    src, dst = f"aisb-it-{uuid.uuid4().hex[:6]}", f"aisb-it-{uuid.uuid4().hex[:6]}"
+    docker.volumes.create(src)
+    try:
+        docker.containers.run("busybox:1.36", "sh", "-c", "echo payload > /d/file; mkdir /d/sub; echo x > /d/sub/y",
+                              volume=[f"{src}:/d"], rm=True)
+        docker.volumes.backup(src, str(tmp_path / "b.tar.gz"))
+        docker.volumes.restore(dst, str(tmp_path / "b.tar.gz"))
+        out = docker.containers.run("busybox:1.36", "cat", "/d/file", "/d/sub/y", volume=[f"{dst}:/d"], rm=True)
+        assert out["output"] == "payload\nx\n"
+    finally:
+        for v in (src, dst):
+            docker.volumes.rm(v, force=True)

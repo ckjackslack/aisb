@@ -140,6 +140,9 @@ class RunSpec:
     tty: bool = False
     rm: bool = False
     health_cmd: str | None = None
+    aliases: tuple[str, ...] = ()   # DNS names on `network`
+    pid: str | None = None          # e.g. "container:web" to share a process namespace
+    hostname: str | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Self:
@@ -151,7 +154,7 @@ class RunSpec:
             norm["env"] = [f"{k}={v}" for k, v in norm["env"].items()]
         if isinstance(norm.get("cmd"), str):
             norm["cmd"] = shlex.split(norm["cmd"])
-        for key in ("cmd", "env", "ports", "volumes"):
+        for key in ("cmd", "env", "ports", "volumes", "aliases"):
             if key in norm:
                 norm[key] = tuple(norm[key])
         if "labels" in norm:
@@ -187,7 +190,9 @@ class RunSpec:
             "Memory": parse_size(self.memory) if self.memory else None,
             "NanoCpus": int(self.cpus * 1e9) if self.cpus else None,
             "AutoRemove": auto_remove or None,
+            "PidMode": self.pid,
         })
+        endpoint = {self.network: {"Aliases": list(self.aliases)}} if self.network and self.aliases else None
         return compact({
             "Image": self.image,
             "Cmd": list(self.cmd) or None,
@@ -200,5 +205,7 @@ class RunSpec:
             "ExposedPorts": exposed or None,
             "Volumes": anonymous or None,
             "Healthcheck": {"Test": ["CMD-SHELL", self.health_cmd]} if self.health_cmd else None,
+            "Hostname": self.hostname,
             "HostConfig": host,
+            "NetworkingConfig": {"EndpointsConfig": endpoint} if endpoint else None,
         })

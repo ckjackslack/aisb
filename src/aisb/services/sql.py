@@ -64,6 +64,17 @@ class SQL(Adapter):
     def activity(self) -> dict[str, Any]:
         raise NotImplementedError
 
+    def schema(self, database: str | None = None) -> dict[str, dict[str, Any]]:
+        """{table: {"columns": {name: {type, nullable, default}}, "indexes": {name: definition}}} in bulk."""
+        raise NotImplementedError
+
+    def ident(self, name: str) -> str:
+        return ".".join('"' + part.replace('"', '""') + '"' for part in name.split("."))
+
+    def count(self, table: str, database: str | None = None) -> int:
+        r = self.query(f"select count(*) as n from {self.ident(table)}", database=database, seconds=120)
+        return int(r.rows[0][0])
+
     def kill(self, pid: int, *, terminate: bool = False) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -217,6 +228,18 @@ class Postgres(SQL):
                          pg_blocking_pids(pid) as blocked_by, left(query, 300) as query
                   from pg_stat_activity
                   where state <> 'idle' and pid <> pg_backend_pid() and backend_type = 'client backend') a))""")
+
+    _USER_SCHEMAS = "not in ('pg_catalog', 'information_schema') and {col} not like 'pg_toast%'"
+
+    def schema(self, database: str | None = None) -> dict[str, dict[str, Any]]:
+        cols = self.query(
+            "select c.table_schema || '.' || c.table_name, c.column_name, c.data_type, c.is_nullable, c.column_default "
+            "from information_schema.columns c join information_schema.tables t using (table_schema, table_name) "
+            f"where t.table_type = 'BASE TABLE' and c.table_schema {self._USER_SCHEMAS.format(col='c.table_schema')} "
+            "order by 1, c.ordinal_position", database=database)
+        idx = self.query(f"select schemaname || '.' || tablename, indexname, indexdef from pg_indexes "
+                         f"where schemaname {self._USER_SCHEMAS.format(col='schemaname')}", database=database)
+        return _schema(cols.rows, idx.rows)
 
     def kill(self, pid: int, *, terminate: bool = False) -> dict[str, Any]:
         fn = "pg_terminate_backend" if terminate else "pg_cancel_backend"
@@ -383,6 +406,22 @@ class MySQL(SQL):
             "active": [dict(zip(active.columns, r)) for r in active.rows],
         }
 
+    def ident(self, name: str) -> str:
+        return ".".join("`" + part.replace("`", "``") + "`" for part in name.split("."))
+
+    def schema(self, database: str | None = None) -> dict[str, dict[str, Any]]:
+        cols = self.query(
+            "select c.table_name, c.column_name, c.column_type, c.is_nullable, c.column_default "
+            "from information_schema.columns c join information_schema.tables t "
+            "on t.table_schema = c.table_schema and t.table_name = c.table_name "
+            "where c.table_schema = database() and t.table_type = 'BASE TABLE' order by 1, c.ordinal_position",
+            database=database)
+        idx = self.query(
+            "select table_name, index_name, concat(if(non_unique = 0, 'UNIQUE ', ''), "
+            "group_concat(column_name order by seq_in_index)) from information_schema.statistics "
+            "where table_schema = database() group by table_name, index_name, non_unique", database=database)
+        return _schema(cols.rows, idx.rows)
+
     def kill(self, pid: int, *, terminate: bool = False) -> dict[str, Any]:
         self.query(f"KILL {'' if terminate else 'QUERY '}{int(pid)}", readonly=False)
         return {"pid": pid, "action": "terminate" if terminate else "cancel", "ok": True}
@@ -429,6 +468,14 @@ class SQLite(SQL):
                 shutil.rmtree(tmp, ignore_errors=True)
         return _timed(go)
 
+    def schema(self, database: str | None = None) -> dict[str, dict[str, Any]]:
+        tmp, conn = self._copy()  # one copy for the whole catalog, not one per query
+        try:
+            return _sqlite_schema(conn)
+        finally:
+            conn.close()
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def tables(self, database: str | None = None) -> Result:
         return self.query("select type as kind, name, tbl_name as 'table' from sqlite_master "
                           "where name not like 'sqlite_%' order by type, name")
@@ -446,6 +493,45 @@ class SQLite(SQL):
         for c in columns:
             c["nullable"] = bool(c["nullable"])
         return {"table": table, "columns": columns, "indexes": rec(idx), "foreign_keys": rec(fks)}
+
+
+def _sqlite_schema(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    tables = conn.execute("select name from sqlite_master where type = 'table' and name not like 'sqlite_%'").fetchall()
+    for (t,) in tables:
+        cols = conn.execute('select name, type, "notnull" = 0, dflt_value from pragma_table_info(?)', (t,)).fetchall()
+        idx = conn.execute("select name, sql from sqlite_master where type = 'index' and tbl_name = ?", (t,)).fetchall()
+        out[t] = {"columns": {c: {"type": ty, "nullable": bool(n), "default": d} for c, ty, n, d in cols},
+                  "indexes": {n: sql or "(auto)" for n, sql in idx}}
+    return out
+
+
+def _schema(col_rows: list[list[Any]], idx_rows: list[list[Any]]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for table, col, type_, nullable, default in col_rows:
+        out.setdefault(table, {"columns": {}, "indexes": {}})["columns"][col] = {
+            "type": type_, "nullable": nullable in ("YES", "1", 1, True), "default": default}
+    for table, name, definition in idx_rows:
+        if table in out:
+            out[table]["indexes"][name] = definition
+    return out
+
+
+def diff_schema(a: dict[str, dict[str, Any]], b: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Tables/columns/indexes only in A, only in B, or different. Pure, engine-agnostic."""
+    changed: dict[str, Any] = {}
+    for t in sorted(a.keys() & b.keys()):
+        entry: dict[str, Any] = {}
+        for part in ("columns", "indexes"):
+            x, y = a[t][part], b[t][part]
+            d = {"only_in_a": sorted(x.keys() - y.keys()), "only_in_b": sorted(y.keys() - x.keys()),
+                 "different": {k: {"a": x[k], "b": y[k]} for k in sorted(x.keys() & y.keys()) if x[k] != y[k]}}
+            if any(d.values()):
+                entry[part] = {k: v for k, v in d.items() if v}
+        if entry:
+            changed[t] = entry
+    return {"tables_only_in_a": sorted(a.keys() - b.keys()), "tables_only_in_b": sorted(b.keys() - a.keys()),
+            "changed": changed, "identical": not changed and a.keys() == b.keys()}
 
 
 def gzip_sink(path: Path) -> tuple[Callable[[bytes], object], Callable[[], int]]:

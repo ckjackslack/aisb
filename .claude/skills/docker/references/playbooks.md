@@ -51,11 +51,19 @@ Stop *looking for causes* at the first step that explains the problem. Still gat
 
 ## Container-to-container networking
 
-1. `A containers inspect A --fields NetworkSettings.Networks` and the same for B. Do they share a user-defined network? The default `bridge` network has **no DNS by name**.
-2. `A networks inspect NET --fields Containers,Internal`.
-3. Resolve from inside: `A containers exec A -- getent hosts B`. Then `A containers exec A -- wget -qO- -T 3 http://B:PORT/`, or `nc -zv B PORT` if the image has it.
-4. Fix, mutate tier: `A networks create app-net`, then `A networks connect app-net A` and `A networks connect app-net B --alias b`.
-5. Host → container: check `HostConfig.PortBindings`, and whether the app listens on `0.0.0.0` rather than `127.0.0.1` inside the container (`A containers exec X -- netstat -tlnp`).
+1. `A net probe SRC DST --port P` checks, in order: shared user-defined network, DST listening on P (and on which address), DNS from SRC, TCP from SRC. `broken_at` is the first failing layer, and each failing step carries a `fix`.
+2. Typical outcomes:
+
+   | `broken_at` | Cause | Fix |
+   |---|---|---|
+   | `shared-network` | Only the default bridge is shared (no DNS by name), or no network is shared. | `networks create` + `networks connect` |
+   | `listening` with "loopback only" | The server binds 127.0.0.1. | Make it bind 0.0.0.0. |
+   | `listening` with "nothing listens" | The app didn't start. | `containers doctor DST` |
+   | `dns` | Wrong name, or not on the same network. | Check the alias in `A net map`. |
+   | `tcp` | Firewall, wrong port, or the app is overloaded. | Investigate further with the tools below. |
+3. `A net map` shows every network with its containers, IPs and DNS aliases.
+4. SRC has no shell or tools: `A containers debug SRC -- nc -zv DST P` (or `--image nicolaka/netshoot -- dig DST`).
+5. Host to container: `A http get NAME /path` resolves the published port. If `via` says "container IP", the port isn't published.
 
 ## Reclaim disk space
 
@@ -104,3 +112,25 @@ Stop *looking for causes* at the first step that explains the problem. Still gat
 2. Back up what you will touch: `A db dump NAME /tmp/before.sql.gz --table TABLE`.
 3. Preview: `A db exec NAME "UPDATE ... WHERE ..." --dry-run`. Show the statement and the expected row count, and get approval.
 4. Run it and compare `affected` with the count from step 1. If they differ, stop and tell the user. The dump from step 2 is the undo path (`db restore`, destroy tier).
+
+## Rehearse a migration on a clone
+
+1. `A db clone NAME NAME-rehearsal` gives a copy of the data in a disposable container, ready when the command returns.
+2. `A db exec NAME-rehearsal --file migration.sql`. Check the timing and errors; iterate freely.
+3. `A db diff NAME NAME-rehearsal --counts` shows exactly what the migration changes. Show it to the user.
+4. Only then apply it to NAME (dump first, see "Safely change data"), and remove the clone with `A containers rm NAME-rehearsal --force` (destroy tier: ask).
+
+## Security review of a host
+
+1. `A system audit` (add `--min-severity info` for everything). Containers are listed worst score first; `most_common` shows systemic issues.
+2. For each critical finding, explain the risk in one line and give its fix. `docker-socket`, `privileged`, `datastore-exposed` and `sensitive-mount` come first.
+3. `A containers secrets NAME --path /app --path /root` for the risky ones, and `A images secrets IMAGE` for images you build. A secret in image history means **rotate it**: removing the layer doesn't unpublish it.
+4. Never echo secret values; the tools mask them, so quote only the masked form.
+
+## Bring up, check and tear down a dev stack
+
+1. Write `stack.json` (format in `src/aisb/stack.py`), then `A stack up stack.json --dry-run` to review the plan.
+2. `A stack up stack.json`. When it returns `ok: true`, every service passed its readiness gate. On `ok: false`, the entry for the failing service has `ready.reason`, and `next` points to `containers doctor`.
+3. `A stack ps stack.json` shows state, ports and `drift` (the file changed since the container was created). To apply drift: `A stack down stack.json --service NAME --dry-run`, ask, then `stack up` again.
+4. `A net probe STACK-app db --port 5432` if a service can't reach another.
+5. `A stack down NAME` (destroy tier). Volumes stay unless `--volumes` is passed, which needs explicit approval.

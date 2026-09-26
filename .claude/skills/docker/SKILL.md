@@ -1,6 +1,6 @@
 ---
 name: docker
-description: Inspect, diagnose, and manage Docker containers, images, networks, and volumes, and operate the services inside them (Postgres, MySQL/MariaDB, SQLite, Redis, MongoDB, nginx and other web servers), through the stdlib-only `aisb` CLI (JSON output, tiered safety). Use when the user asks about running containers, docker logs, why a container is crashing / restarting / unhealthy / OOM-killed, port or network problems, disk usage and cleanup, building or running images, executing a command in a container, querying or dumping a database in a container, inspecting Redis keys, checking what queries are running or blocked, reloading nginx, calling a container's HTTP endpoint, or reading files from a container.
+description: Inspect, diagnose, and manage Docker containers, images, networks, and volumes, and operate the services inside them (Postgres, MySQL/MariaDB, SQLite, Redis, MongoDB, nginx and other web servers), through the stdlib-only `aisb` CLI (JSON output, tiered safety). Use when the user asks about running containers, docker logs, why a container is crashing / restarting / unhealthy / OOM-killed, port or network problems, disk usage and cleanup, building or running images, executing a command in a container, querying or dumping a database in a container, inspecting Redis keys, checking what queries are running or blocked, reloading nginx, calling a container's HTTP endpoint, reading files from a container, bringing up a multi-service dev stack, rehearsing a migration on a copy of a database, comparing schemas or container configs, debugging why one container can't reach another, security-auditing containers or finding leaked secrets in images, backing up volumes, slimming images, watching a deploy, or inspecting Kafka topics/consumer lag, RabbitMQ queues or Elasticsearch indices.
 ---
 
 # Docker via `aisb`
@@ -69,6 +69,24 @@ Before a session that will create or change things, take a snapshot so you can r
 
 Rules: prefer `db query` over `db exec` for anything read-only. Put `LIMIT` in exploratory SQL. Never `--reveal` or print credentials unless the user asked. Treat `db exec`, `db kill`, `redis cmd`, `mongo eval` and `http send` as changes that need clear intent.
 
+## Workflows and safety nets
+
+| Need | Command | Notes |
+|---|---|---|
+| A dev stack without Compose | `stack up FILE.json`, `stack ps`, `stack down NAME` | Dependency order, each service gated on a real readiness probe. Services reach each other by service name. Changed config is reported as `drift`, never silently recreated. `down` is destroy tier. File format: `stack.py` docstring. |
+| Rehearse a risky DB change | `db clone NAME COPY`, then `db exec COPY ...`, then `db diff NAME COPY --counts` | Real data, disposable container. **Default to this before any destructive migration on data you can't recreate.** |
+| Schema / config drift | `db diff A B [--counts]`, `containers compare A B` | Tables, columns, indexes, row counts; env (secrets masked), ports, mounts, image digest. |
+| "A can't reach B" | `net probe A B --port P`, `net map` | Checks shared network, B listening (and on which address), DNS, TCP; `broken_at` names the failing layer. |
+| No tools in the image | `containers debug NAME -- CMD` | Throwaway alpine (or `--image nicolaka/netshoot`) sidecar sharing NAME's network and PID namespaces. |
+| Cross-service story | `containers timeline A B C --since 5m [--patterns]` | One stream ordered by Docker timestamps. |
+| Security review | `system audit`, `containers secrets NAME [--path /app]`, `images secrets IMG` | Scored findings with fixes. Secrets are masked; **never print unmasked values**. Report rotation for anything found in image history. |
+| Backups | `volumes backup VOL out.tar.gz`; `volumes restore VOL f.tar.gz` | Restore is destroy tier. A live database volume copy is crash-consistent; prefer `db dump` for databases. |
+| Image size | `images slim IMG` | Largest layers plus Dockerfile fixes. |
+| Babysit a deploy | `system watch --interval 10 --duration 600 --until-change` | Returns on the first change (new failure, stop, recovery). Exit 0 with `changes: []` means it stayed quiet. |
+| Brokers / search | `kafka topics / groups / peek`, `rabbit queues / exchanges / peek`, `es health / indices / search` | `kafka groups`: an idle group with lag is a stalled consumer. `rabbit peek` requeues but marks messages redelivered (mutate tier). |
+
+MCP: `aisb mcp` serves every op as a tool (`--max-tier read` for a read-only toolset). Destroy tools need `confirm=true`, and the same approval rules apply.
+
 ## Safety rules (non-negotiable)
 
 Every op has a tier, listed in the `tier` column of [references/commands.md](references/commands.md), which is the source of truth.
@@ -102,5 +120,9 @@ For multi-step tasks, read [references/playbooks.md](references/playbooks.md) an
 - Build an image and smoke-test it.
 - Investigate a slow or stuck database.
 - Safely change data in a database container.
+- Rehearse a migration on a clone.
+- Debug connectivity between containers.
+- Security review of a host.
+- Bring up, check and tear down a dev stack.
 
 End every diagnosis with: **evidence** (quoted fields and log lines), **root-cause hypothesis**, and **proposed fix**, including the exact command. Mark it destroy-tier if it is one.

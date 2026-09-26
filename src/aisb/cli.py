@@ -61,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
                 _add_param(p, prm)
             p.set_defaults(_op=o)
     resources.add_parser("docs", help="print the Markdown command reference").set_defaults(_op=None)
+    resources.add_parser("mcp", help="run the MCP server over stdio (see `aisb mcp --help`)")
     return root
 
 
@@ -128,7 +129,11 @@ def parse(argv: Sequence[str]) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = parse(sys.argv[1:] if argv is None else argv)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["mcp"]:
+        from .mcp import main as mcp_main
+        return mcp_main(argv[1:])
+    args = parse(argv)
     if args._op is None:
         sys.stdout.write(render_markdown())
         return EXIT_OK

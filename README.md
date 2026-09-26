@@ -52,6 +52,25 @@ aisb fs cat distroless-app /app/config.yaml     # works without a shell in the i
 
 Adapters (`aisb.services`) register with `@register`, so a new engine is a class with `image_rx`, credentials, and the methods it supports.
 
+## Workflows
+
+```bash
+aisb stack up stack.json                  # services in dependency order, each gated on real readiness; stack down NAME
+aisb db clone pg pg-rehearsal             # disposable copy with real data, for rehearsing migrations
+aisb db diff pg pg-rehearsal --counts     # schema + row-count drift
+aisb containers compare api-blue api-green  # env (secrets masked), ports, mounts, image digest
+aisb net probe api db --port 5432         # shared network -> listening (which address?) -> DNS -> TCP
+aisb containers debug distroless -- nc -zv db 5432    # toolbox sidecar in the target's namespaces
+aisb containers timeline api db cache --since 5m      # interleaved logs by timestamp
+aisb system audit                         # scored security/config audit
+aisb images secrets app:1                 # credentials leaked into image history
+aisb volumes backup pgdata pg.tar.gz      # via a never-started helper; restore is destroy tier
+aisb images slim app:1                    # largest layers + Dockerfile fixes
+aisb system watch --until-change          # returns on the first change in fleet health
+aisb kafka groups kfk; aisb rabbit queues rmq; aisb es search es books '{"query":{...}}'
+aisb mcp [--max-tier read]                # every op as an MCP tool over stdio
+```
+
 ## Design
 
 ```
@@ -61,7 +80,10 @@ models.py      compact dataclass views + RunSpec (declarative container config -
 ops.py         @op(Tier) registry: CLI flags, JSON schemas, docs and safety policy come from one declaration
 api/*.py       containers, images, networks, volumes, system
 insights/      pure analysis: log fingerprinting, rule-based triage, snapshot diffs
-services/      adapters for software inside containers: postgres, mysql/mariadb, sqlite, redis, mongo, web servers
+services/      adapters for software inside containers: postgres, mysql/mariadb, sqlite, redis, mongo, kafka,
+               rabbitmq, elasticsearch/opensearch, web servers
+stack.py       stack files: validation, naming, dependency order (graphlib), config hashes
+mcp.py         MCP server (stdio JSON-RPC) generated from the registry
 cli.py         argparse generated from the registry; JSON on stdout; exit codes 0/1/2/3/4
 ```
 

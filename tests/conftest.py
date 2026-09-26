@@ -67,21 +67,26 @@ class FakeDaemon:
         """Serve a queue of exec results for `ref`; returns the list that collects each exec's create request."""
         created: list[Seen] = []
 
+        prefix = f"e-{ref}-"  # exec ids are namespaced per container so several queues can coexist
+
+        def index(seen: Seen) -> int:
+            return int(seen.path.split("/")[2].removeprefix(prefix))
+
         def create(seen: Seen) -> Reply:
             created.append(seen)
-            return Reply(201, json={"Id": f"e{len(created) - 1}"})
+            return Reply(201, json={"Id": f"{prefix}{len(created) - 1}"})
 
         def start(seen: Seen) -> Reply:
-            out, err, _ = results[int(seen.path.split("/")[2][1:])]
+            out, err, _ = results[index(seen)]
             return Reply(body=(frame(1, out) if out else b"") + (frame(2, err) if err else b""),
                          content_type="application/vnd.docker.multiplexed-stream")
 
         def inspect(seen: Seen) -> Reply:
-            return Reply(json={"ExitCode": results[int(seen.path.split("/")[2][1:])][2]})
+            return Reply(json={"ExitCode": results[index(seen)][2]})
 
         self.on("POST", f"/containers/{ref}/exec", create)
-        self.on("POST", r"/exec/e\d+/start", start)
-        self.on("GET", r"/exec/e\d+/json", inspect)
+        self.on("POST", rf"/exec/{re.escape(prefix)}\d+/start", start)
+        self.on("GET", rf"/exec/{re.escape(prefix)}\d+/json", inspect)
         return created
 
     def calls(self, method: str | None = None) -> list[tuple[str, str]]:

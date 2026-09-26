@@ -1,26 +1,21 @@
 from types import TracebackType
 
-from .api import Containers, Db, Fs, Http, Images, MongoOps, Networks, RedisOps, Svc, System, Volumes
+from .api import (Containers, Db, Fs, Http, Images, KafkaOps, MongoOps, Net, Networks, RabbitOps, RedisOps, SearchOps,
+                  StackOps, Svc, System, Volumes)
 from .ops import Resource
 from .transport import Transport, resolve_endpoint
 
 
 class Docker:
-    """Facade over the resource APIs: ``Docker().containers.ls(all=True)``."""
+    """Facade over the resource APIs: ``Docker().containers.ls(all=True)``, ``Docker().db.query("pg", "select 1")``."""
 
     def __init__(self, host: str | None = None, *, timeout: float | None = 60.0, version: str | None = None) -> None:
-        self.transport = Transport(resolve_endpoint(host), timeout=timeout, version=version)
-        self.containers = Containers(self.transport)
-        self.images = Images(self.transport)
-        self.networks = Networks(self.transport)
-        self.volumes = Volumes(self.transport)
-        self.system = System(self.transport)
-        self.svc = Svc(self.transport)
-        self.db = Db(self.transport)
-        self.redis = RedisOps(self.transport)
-        self.mongo = MongoOps(self.transport)
-        self.http = Http(self.transport)
-        self.fs = Fs(self.transport)
+        t = self.transport = Transport(resolve_endpoint(host), timeout=timeout, version=version)
+        self.containers, self.images, self.networks, self.volumes = Containers(t), Images(t), Networks(t), Volumes(t)
+        self.system, self.stack, self.net = System(t), StackOps(t), Net(t)
+        self.svc, self.db, self.redis, self.mongo = Svc(t), Db(t), RedisOps(t), MongoOps(t)
+        self.kafka, self.rabbit, self.es = KafkaOps(t), RabbitOps(t), SearchOps(t)
+        self.http, self.fs = Http(t), Fs(t)
 
     def resource(self, name: str) -> Resource:
         res = getattr(self, name, None)

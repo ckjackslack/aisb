@@ -1,3 +1,4 @@
+import heapq
 import re
 import shlex
 import socket
@@ -62,6 +63,32 @@ class ExecResult:
     @property
     def stderr(self) -> str:
         return self.err.decode(errors="replace")
+
+
+def compare_specs(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
+    """Field-by-field diff of two RunSpec dicts; list fields as added/removed, env by key, secrets masked."""
+    from ..transport import SECRET_KEY
+    same, different = [], {}
+    for key in sorted(a.keys() | b.keys()):
+        x, y = a.get(key), b.get(key)
+        if x == y:
+            same.append(key)
+        elif key == "env":
+            ex = dict(e.partition("=")[::2] for e in x or [])
+            ey = dict(e.partition("=")[::2] for e in y or [])
+            mask = lambda k, v: "***" if SECRET_KEY.search(k) and v else v  # noqa: E731
+            different["env"] = {
+                "only_in_a": {k: mask(k, ex[k]) for k in sorted(ex.keys() - ey.keys())},
+                "only_in_b": {k: mask(k, ey[k]) for k in sorted(ey.keys() - ex.keys())},
+                "different": {k: {"a": mask(k, ex[k]), "b": mask(k, ey[k])}
+                              for k in sorted(ex.keys() & ey.keys()) if ex[k] != ey[k]},
+            }
+        elif isinstance(x, list) or isinstance(y, list):
+            sx, sy = set(map(str, x or [])), set(map(str, y or []))
+            different[key] = {"only_in_a": sorted(sx - sy), "only_in_b": sorted(sy - sx)}
+        else:
+            different[key] = {"a": x, "b": y}
+    return {"identical": not different, "different": different, "same": same}
 
 
 def port_open(spec: str, timeout: float = 1.0) -> bool:
@@ -327,16 +354,8 @@ class Containers(Resource, name="containers"):
                        volumes=tuple(volume or ()), labels=label, restart=restart, network=network,
                        workdir=workdir, user=user, memory=memory, cpus=cpus, entrypoint=entrypoint,
                        tty=tty, rm=rm, health_cmd=health_cmd)
-        body = s.to_api(auto_remove=s.rm and detach)
         warn = {"warnings": w} if self.t.planning and (w := self.preflight(s, pull=pull)) else {}
-        create = lambda: self.t.json("POST", "/containers/create", query={"name": s.name}, body=body)  # noqa: E731
-        try:
-            cid = create()["Id"]
-        except NotFound:
-            if not pull:
-                raise
-            Images(self.t).pull(s.image)
-            cid = create()["Id"]
+        cid = self.create_from(s, pull=pull, auto_remove=s.rm and detach)
         self.t.json("POST", f"/containers/{cid}/start")
         if detach:
             return {"id": cid[:12], "name": s.name, "status": "started", **warn}
@@ -345,6 +364,110 @@ class Containers(Resource, name="containers"):
         if s.rm:
             self.t.json("DELETE", f"/containers/{cid}", query={"force": True})
         return {"id": cid[:12], "exit_code": status.get("StatusCode"), **out, **warn}
+
+    def create_from(self, s: RunSpec, *, pull: bool = True, auto_remove: bool = False) -> str:
+        """Create (not start) a container from a RunSpec, pulling the image on demand; returns its id."""
+        body = s.to_api(auto_remove=auto_remove)
+        create = lambda: self.t.json("POST", "/containers/create", query={"name": s.name}, body=body)  # noqa: E731
+        try:
+            return create()["Id"]
+        except NotFound:
+            if not pull:
+                raise
+            Images(self.t).pull(s.image)
+            return create()["Id"]
+
+    @op(Tier.READ)
+    def secrets(self, ref: Ref, *, path: Annotated[list[str] | None, "also scan files under these paths"] = None,
+                max_mb: Annotated[int, "archive budget per path (MiB)"] = 128) -> dict[str, Any]:
+        """Find exposed credentials: plain secrets in env, secrets in image history, and (with --path) key files
+        and known token formats inside files. Values are masked."""
+        from ..insights.audit import dedupe, scan_env, scan_history, scan_text
+        from .fs import Fs
+        from .images import Images
+        info = self.t.json("GET", f"/containers/{q(ref)}/json")
+        hits = scan_env((info.get("Config") or {}).get("Env") or [])
+        try:
+            hits += scan_history(Images(self.t).history(info.get("Image", "")))
+        except NotFound:
+            pass
+        risky = re.compile(r"(^|/)(\.env(\..*)?|id_(rsa|ed25519|ecdsa)|.*\.pem|.*\.key|credentials|\.npmrc|\.pypirc|"
+                           r"\.git-credentials|\.netrc|\.docker/config\.json|.*\.p12|.*\.pfx)$")
+        scanned = 0
+        for root in path or []:
+            for m, rel, tar in Fs(self.t)._members(ref, root, max_mb):
+                if not m.isfile():
+                    continue
+                where = f"{root.rstrip('/')}/{rel}"
+                if risky.search(rel):
+                    hits.append({"kind": "sensitive-file", "where": where, "sample": f"{m.size} bytes"})
+                if m.size <= 256 * 1024:
+                    data = tar.extractfile(m).read()  # type: ignore[union-attr]
+                    if b"\0" not in data[:1024]:
+                        scanned += 1
+                        hits += scan_text(data.decode(errors="ignore"), where)
+        hits = dedupe(hits)
+        return {"container": ref, "count": len(hits), "files_scanned": scanned, "findings": hits}
+
+    @op(Tier.READ)
+    def compare(self, ref: Ref, other: Annotated[str, "second container"]) -> dict[str, Any]:
+        """Config drift between two containers: env (secrets masked), ports, mounts, command, image digest, limits."""
+        ia, ib = (self.t.json("GET", f"/containers/{q(r)}/json") for r in (ref, other))
+        return compare_specs(runspec_of(ia) | {"image_id": ia.get("Image", "")[7:19]},
+                             runspec_of(ib) | {"image_id": ib.get("Image", "")[7:19]})
+
+    @op(Tier.READ)
+    def timeline(self, *refs: Annotated[str, "containers to interleave"],
+                 since: Annotated[str, "unix ts, ISO time, or relative like 10m"] = "10m",
+                 tail: Annotated[int, "max lines per container"] = 1000,
+                 grep: Annotated[str | None, "only lines matching this regex"] = None,
+                 patterns: Annotated[bool, "fingerprint the merged stream instead of printing it"] = False,
+                 max_bytes: MaxBytes = 64 * 1024) -> dict[str, Any]:
+        """Merge several containers' logs into one timeline by Docker's timestamps, each line tagged with its source."""
+        if len(refs) < 1:
+            raise ValueError("usage: aisb containers timeline api db cache --since 5m")
+        rx = re.compile(grep) if grep else None
+        streams = []
+        for r in refs:
+            text = self._text(r, tail=tail, since=since, timestamps=True)
+            entries = []
+            for line in text.splitlines():
+                ts, _, msg = line.partition(" ")
+                if (when := docker_time(ts)) is not None and (not rx or rx.search(msg)):
+                    entries.append((when, r, msg))
+            streams.append(entries)
+        merged = list(heapq.merge(*streams))
+        width = max(len(r) for r in refs)
+        if patterns:
+            fp = insights.fingerprint([f"[{r}] {m}" for _, r, m in merged], top=20)
+            return {"containers": list(refs), "since": since, **fp}
+        lines = [f"{time.strftime('%H:%M:%S', time.gmtime(t))}.{int(t % 1 * 1000):03d} {r:<{width}} | {m}"
+                 for t, r, m in merged]
+        return {"containers": list(refs), "since": since, "lines": len(lines),
+                **clip("\n".join(lines) + ("\n" if lines else ""), max_bytes)}
+
+    @op(Tier.MUTATE)
+    def debug(self, ref: Ref, *cmd: Cmd,
+              image: Annotated[str, "toolbox image (e.g. nicolaka/netshoot for tcpdump/dig/curl)"] = "alpine:3.20",
+              max_bytes: MaxBytes = 64 * 1024) -> dict[str, Any]:
+        """Run a command in a throwaway sidecar sharing REF's network and PID namespaces (for images with no tools).
+
+        localhost is REF's localhost, and REF's processes are visible (`ps`, /proc/1/root/...). The sidecar is
+        removed afterwards.
+        """
+        if not cmd:
+            raise ValueError("usage: aisb containers debug NAME -- nc -zv db 5432")
+        target = self.t.json("GET", f"/containers/{q(ref)}/json")["Id"]
+        spec = RunSpec(image=image, cmd=tuple(cmd), network=f"container:{target}", pid=f"container:{target}",
+                       labels={"aisb.debug-of": ref})
+        cid = self.create_from(spec)
+        try:
+            self.t.json("POST", f"/containers/{cid}/start")
+            status = self.t.json("POST", f"/containers/{cid}/wait", timeout=None) or {}
+            out = self.logs(cid, tail=0, max_bytes=max_bytes)
+        finally:
+            self.t.json("DELETE", f"/containers/{cid}", query={"force": True})
+        return {"target": ref, "image": image, "exit_code": status.get("StatusCode"), **out}
 
     def _act(self, ref: str, action: str, grace: int | None = None) -> dict[str, Any]:
         try:

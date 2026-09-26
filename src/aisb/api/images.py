@@ -39,6 +39,22 @@ class Images(Resource, name="images"):
         return [{"created_by": h.get("CreatedBy", ""), "size": h.get("Size", 0), "created": h.get("Created", 0)}
                 for h in self.t.json("GET", f"/images/{q(ref)}/history")]
 
+    @op(Tier.READ)
+    def secrets(self, ref: Ref) -> dict[str, Any]:
+        """Credentials baked into an image: ENV/ARG values and build args in layer history, known token formats."""
+        from ..insights.audit import dedupe, scan_env, scan_history
+        info = self.t.json("GET", f"/images/{q(ref)}/json") or {}
+        hits = dedupe(scan_history(self.history(ref)) + scan_env((info.get("Config") or {}).get("Env") or [], "image env"))
+        return {"image": ref, "count": len(hits), "findings": hits,
+                "note": "anything found here is readable by everyone who can pull the image: rotate it" if hits else None}
+
+    @op(Tier.READ)
+    def slim(self, ref: Ref) -> dict[str, Any]:
+        """Where an image's bytes are, and which Dockerfile habits put them there (with the fix for each)."""
+        from ..insights.audit import slim
+        info = self.t.json("GET", f"/images/{q(ref)}/json") or {}
+        return {"image": ref, **slim(self.history(ref), int(info.get("Size") or 0))}
+
     @op(Tier.MUTATE)
     def pull(self, ref: Ref) -> dict[str, Any]:
         """Pull an image (defaults to :latest)."""

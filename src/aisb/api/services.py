@@ -1,6 +1,7 @@
 """Operate the software inside containers: SQL databases, Redis, MongoDB, web servers."""
 
 import gzip
+import json
 import re
 import time
 from pathlib import Path
@@ -10,8 +11,10 @@ from ..ops import Resource, Tier, op
 from ..services import REGISTRY, SQL, Adapter, ServiceError, SQLite, Target
 from ..services.fmt import infer, render, shape
 from ..services.mongo import Mongo
+from ..services.queues import Kafka, RabbitMQ, Search
 from ..services.redis import Redis
-from ..services.sql import gzip_sink
+from ..models import RunSpec
+from ..services.sql import diff_schema, gzip_sink
 from ..util import q
 from .containers import Containers
 
@@ -229,6 +232,68 @@ class Db(Resource, name="db"):
         return self.exec_(ref, file=file, database=database, single_transaction=single_transaction, engine=engine)
 
     @op(Tier.READ)
+    def diff(self, ref: Ref, other: Annotated[str | None, "second container (default: the same one)"] = None, *,
+             database: Database = None, other_database: Annotated[str | None, "database in the second container"] = None,
+             counts: Annotated[bool, "also compare exact row counts of common tables (slower)"] = False,
+             engine: Engine = None, path: DbPath = None,
+             other_path: Annotated[str | None, "SQLite path in the second container"] = None) -> dict[str, Any]:
+        """Schema drift between two databases (tables, columns, indexes), optionally row counts too."""
+        if other is None and other_database is None and other_path is None:
+            raise ValueError("compare against another container, --other-database, or --other-path")
+        a = sql_adapter(self, ref, engine, path)
+        b = sql_adapter(self, other or ref, engine, other_path)
+        sa, sb = a.schema(database), b.schema(other_database or (database if other else None))
+        out = {"a": f"{ref}/{database or a.database() or path or ''}".rstrip("/"),
+               "b": f"{other or ref}/{other_database or b.database() or other_path or ''}".rstrip("/"),
+               **diff_schema(sa, sb)}
+        if counts:
+            common = sorted(sa.keys() & sb.keys())[:200]
+            rows = {t: (a.count(t, database), b.count(t, other_database)) for t in common}
+            out["row_counts"] = {t: {"a": x, "b": y} for t, (x, y) in rows.items() if x != y}
+            out["identical"] = out["identical"] and not out["row_counts"]
+        return out
+
+    @op(Tier.MUTATE)
+    def clone(self, ref: Ref, name: Annotated[str, "name of the new container"], *, database: Database = None,
+              port: Annotated[int | None, "publish the clone on 127.0.0.1:PORT"] = None,
+              within: Annotated[float, "readiness timeout (seconds)"] = 180.0) -> dict[str, Any]:
+        """Disposable copy of a database container with its data: rehearse migrations or risky writes, then drop it.
+
+        Same image, command and credentials (*_FILE secrets resolved), no volumes or published ports of the
+        original. The clone is labelled aisb.clone-of=REF; remove it with `containers rm NAME --force`.
+        """
+        src = adapter(self, ref, SQL)
+        ctr = Containers(self.t)
+        info = self.t.json("GET", f"/containers/{q(ref)}/json")
+        env = {}
+        for k, _, v in (e.partition("=") for e in (info.get("Config") or {}).get("Env") or []):
+            if k.endswith("_FILE") and v.startswith("/"):
+                env[k[:-5]] = src.read_file(v).rstrip("\n")  # the secret mount doesn't come along
+            else:
+                env[k] = v
+        cfg = info.get("Config") or {}
+        spec = RunSpec(image=cfg.get("Image") or src.t.image, cmd=tuple(cfg.get("Cmd") or ()), name=name,
+                       env=tuple(f"{k}={v}" for k, v in env.items()),
+                       ports=(f"127.0.0.1:{port}:{src.default_port()}",) if port else (),
+                       labels={"aisb.clone-of": src.t.name})
+        ctr.create_from(spec)
+        self.t.json("POST", f"/containers/{q(name)}/start")
+        if self.t.planning:
+            return {"clone": name, "source": ref}
+        started = time.monotonic()
+        ready = Svc(self.t).ready(name, within=within, stable=1.0)
+        if not ready["ok"]:
+            return {"ok": False, "clone": name, "reason": "clone did not become ready", "ready": ready}
+        buf = bytearray()
+        src.dump(buf.extend, database=database)
+        dst = adapter(self, name, SQL)
+        dst.script(bytes(buf), database=database)
+        return {"ok": True, "clone": name, "source": ref, "engine": src.kind, "dump_bytes": len(buf),
+                "seconds": round(time.monotonic() - started, 2), "url": dst.url(),
+                "next": [f"aisb db query {name} \"...\"", f"aisb db diff {ref} {name}",
+                         f"aisb containers rm {name} --force --dry-run"]}
+
+    @op(Tier.READ)
     def activity(self, ref: Ref) -> dict[str, Any]:
         """What the database is doing now: running queries (longest first), blockers, connections, cache hit ratio."""
         db = adapter(self, ref, SQL)
@@ -294,3 +359,68 @@ class MongoOps(Resource, name="mongo"):
         """Run mongosh JavaScript against a database and return the result as JSON."""
         return {"result": adapter(self, ref, Mongo).js(script, database=database)}
 
+
+
+class KafkaOps(Resource, name="kafka"):
+    @op(Tier.READ)
+    def topics(self, ref: Ref, *, all: Annotated[bool, "include internal topics (__consumer_offsets, ...)"] = False,
+               ) -> list[dict[str, Any]]:
+        """Topics with partition count, replication factor and under-replicated partitions."""
+        return adapter(self, ref, Kafka).topics(internal=all)
+
+    @op(Tier.READ)
+    def groups(self, ref: Ref) -> list[dict[str, Any]]:
+        """Consumer groups by total lag (worst first), with members; idle groups with lag mean stalled consumers."""
+        return adapter(self, ref, Kafka).groups()
+
+    @op(Tier.READ)
+    def peek(self, ref: Ref, topic: str, *, limit: Annotated[int, "max messages"] = 10,
+             seconds: Annotated[int, "stop waiting after N seconds"] = 5) -> dict[str, Any]:
+        """Read messages from the beginning without a consumer group (commits nothing, disturbs no one)."""
+        msgs = adapter(self, ref, Kafka).peek(topic, limit=limit, seconds=seconds)
+        return {"topic": topic, "count": len(msgs), "messages": msgs}
+
+
+class RabbitOps(Resource, name="rabbit"):
+    @op(Tier.READ)
+    def queues(self, ref: Ref, *, vhost: Annotated[str, "virtual host"] = "/") -> list[dict[str, Any]]:
+        """Queues by depth: ready/unacked messages, consumers, state."""
+        return adapter(self, ref, RabbitMQ).queues(vhost)
+
+    @op(Tier.READ)
+    def exchanges(self, ref: Ref, *, vhost: Annotated[str, "virtual host"] = "/") -> list[dict[str, Any]]:
+        """Exchanges with type and durability."""
+        return adapter(self, ref, RabbitMQ).exchanges(vhost)
+
+    @op(Tier.MUTATE)
+    def peek(self, ref: Ref, queue: str, *, vhost: str = "/", limit: int = 5) -> dict[str, Any]:
+        """Look at messages and requeue them (management API). They come back flagged redelivered, so mutate tier."""
+        msgs = adapter(self, ref, RabbitMQ).peek(queue, vhost=vhost, limit=limit)
+        return {"queue": queue, "count": len(msgs), "messages": msgs}
+
+
+class SearchOps(Resource, name="es"):
+    @op(Tier.READ)
+    def health(self, ref: Ref) -> dict[str, Any]:
+        """Cluster health: status, nodes, active and unassigned shards."""
+        return adapter(self, ref, Search).stats()
+
+    @op(Tier.READ)
+    def indices(self, ref: Ref, *, format: Fmt = "json") -> Any:
+        """Indices (system ones hidden) with health, doc count, size, shards."""
+        rows = adapter(self, ref, Search).indices()
+        if format == "json":
+            return rows
+        cols = list(rows[0]) if rows else ["index"]
+        return {"output": render(cols, [[r[c] for c in cols] for r in rows], format)}
+
+    @op(Tier.READ)
+    def search(self, ref: Ref, index: Annotated[str, "index name or pattern"],
+               query: Annotated[str, "query DSL JSON, e.g. '{\"query\":{\"match\":{\"title\":\"x\"}}}'"] = "{}",
+               *, limit: int = 10) -> dict[str, Any]:
+        """Search with query DSL; hits flattened with _index/_id/_score."""
+        try:
+            body = json.loads(query)
+        except ValueError as e:
+            raise ValueError(f"query must be JSON: {e}") from None
+        return adapter(self, ref, Search).search(index, body, limit=limit)

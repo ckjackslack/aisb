@@ -246,3 +246,20 @@ def test_sbom_and_envcheck(docker, name):
     r = docker.containers.envcheck(name)
     assert r["missing_required"][0]["var"] == "DATABASE_URL"
     assert r["missing_required"][0]["did_you_mean"] == "DATABSE_URL"
+
+
+def test_pyinfra_connector_live(docker, name):
+    pytest.importorskip("pyinfra")
+    import io
+
+    from pyinfra.api import Config, Inventory, State, StringCommand
+    from pyinfra.api.connect import connect_all
+    from pyinfra.facts.server import LinuxName
+    docker.containers.run(IMAGE, "sleep", "300", name=name, detach=True)
+    inv = Inventory(([f"@aisb/{name}"], {}))
+    connect_all(State(inv, Config()))
+    h = inv.get_host(f"@aisb/{name}")
+    assert h.put_file(io.BytesIO(b"k=v\n"), "/etc/aisb-test.conf")
+    ok, out = h.run_shell_command(StringCommand("cat", "/etc/aisb-test.conf"))
+    assert ok and out.stdout == "k=v"
+    assert h.get_fact(LinuxName) == "Alpine"

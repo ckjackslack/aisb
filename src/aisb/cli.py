@@ -62,6 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
             p.set_defaults(_op=o)
     resources.add_parser("docs", help="print the Markdown command reference").set_defaults(_op=None)
     resources.add_parser("mcp", help="run the MCP server over stdio (see `aisb mcp --help`)")
+    resources.add_parser("bundle", help="write aisb as one executable .pyz (see `aisb bundle --help`)")
     resources.add_parser("portal", help="local web UI, read-only by default (see `aisb portal --help`)")
     return root
 
@@ -134,6 +135,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if argv[:1] == ["mcp"]:
         from .mcp import main as mcp_main
         return mcp_main(argv[1:])
+    if argv[:1] == ["bundle"]:
+        from .bundle import main as bundle_main
+        return bundle_main(argv[1:])
     if argv[:1] == ["portal"]:
         from .portal import main as portal_main
         return portal_main(argv[1:])

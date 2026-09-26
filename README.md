@@ -92,6 +92,37 @@ aisb system rightsize --seconds 120; aisb containers limit api --memory 256m --c
 aisb portal [--allow mutate]                           # local, token-protected web dashboard
 ```
 
+## Fleet: `aisb bundle` + pyinfra
+
+Being stdlib-only, aisb ships as **one deterministic `.pyz`** (~160 KB) that runs on any host with Python >= 3.11:
+no pip, no venv, no docker CLI. `aisb bundle aisb.pyz`, copy it anywhere, `python3 aisb.pyz system doctor`.
+
+[pyinfra](https://pyinfra.com) is the natural carrier: agentless over SSH, and the optional integration
+(`pip install 'aisb[pyinfra]'`, `aisb.contrib.pyinfra`, never imported by the core) plugs in both directions.
+
+```python
+# deploy.py: pyinfra -> hosts, aisb -> Docker on each host
+from pyinfra import host
+from aisb.contrib.pyinfra import operations as aisb
+from aisb.contrib.pyinfra.facts import AisbDoctor
+
+aisb.install()                                             # uploads the bundle; skipped while unchanged
+aisb.stack(src="stacks/shop.json", recreate_drifted=True)  # converge: noop when running with the same config
+aisb.ready(container="shop-db", within=120)                # gate: the service really answers, or the deploy fails
+aisb.limits(container="shop-api", memory="256m", cpus=0.5) # live update, only when the limits differ
+aisb.call("session", "begin")                              # any op; destroy tier needs confirm=True
+if host.get_fact(AisbDoctor)["summary"]["failing"]: ...    # read-only ops as facts (mutate/destroy refused)
+```
+
+```bash
+pyinfra @aisb/web exec -- nginx -t            # connector: pyinfra operations *inside* containers,
+pyinfra @aisb/stack:shop deploy_in.py         # via Engine API exec + archive (no docker CLI, no image commits)
+```
+
+Idempotency is real: a second run of the deploy above reports "No change" for everything except the
+readiness gate. Stack drift (a changed service config) is reported and left running unless
+`recreate_drifted=True`, which is the explicit approval to replace those containers (volumes are kept).
+
 ## Design
 
 ```
@@ -106,6 +137,8 @@ services/      adapters for software inside containers: postgres, mysql/mariadb,
                rabbitmq, elasticsearch/opensearch, web servers
 rootfs.py      streaming walks over a container's filesystem via the archive API
 state.py       $AISB_HOME (0700): sessions, blackbox records
+bundle.py      deterministic single-file .pyz of aisb (stdlib zipfile)
+contrib/       optional third-party integrations (pyinfra facts, operations, @aisb connector)
 portal.py      stdlib web UI over the registry (token, Host allowlist, no destroy)
 stack.py       stack files: validation, naming, dependency order (graphlib), config hashes
 mcp.py         MCP server (stdio JSON-RPC) generated from the registry
@@ -125,5 +158,6 @@ The Claude Code skill lives in `.claude/skills/docker/`. Its `references/command
 
 ```bash
 pip install pytest && pytest -q    # unit + CLI tests against a fake daemon on a unix socket
+pip install pyinfra                # enables tests/test_pyinfra.py (otherwise skipped)
 pytest -m docker                   # live round-trips; auto-skipped without a daemon
 ```

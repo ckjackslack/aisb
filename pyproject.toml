@@ -12,9 +12,13 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+pyinfra = ["pyinfra>=3.1"]
 
 [project.scripts]
 aisb = "aisb.cli:main"
+
+[project.entry-points."pyinfra.connectors"]
+aisb = "aisb.contrib.pyinfra.connector:AisbConnector"
 
 [tool.setuptools.packages.find]
 where = ["src"]

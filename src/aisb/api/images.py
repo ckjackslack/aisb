@@ -1,4 +1,4 @@
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from ..errors import APIError
 from ..models import Image
@@ -54,6 +54,67 @@ class Images(Resource, name="images"):
         from ..insights.audit import slim
         info = self.t.json("GET", f"/images/{q(ref)}/json") or {}
         return {"image": ref, **slim(self.history(ref), int(info.get("Size") or 0))}
+
+    def inventory(self, ref: str, *, hash_files: bool) -> Any:
+        """Stream the image's rootfs once (via a transient helper) into a package + file inventory."""
+        from ..insights.packages import HASH_LIMIT, Inventory, wants
+        from ..rootfs import walk
+        from .containers import Containers
+        inv = Inventory()
+        with Containers(self.t).transient(ref, pull=False) as cid:
+            for m, rel, data in walk(self.t, cid, "/", budget_mib=8192,
+                                     want=lambda r, mm: wants(r, mm.size) or (hash_files and mm.size <= HASH_LIMIT)):
+                if rel:
+                    inv.add(rel, m, data)
+        return inv
+
+    @op(Tier.READ)
+    def sbom(self, ref: Ref, *, format: Annotated[Literal["json", "cyclonedx"], "output format"] = "json",
+             ecosystem: Annotated[str | None, "only this ecosystem (apk, dpkg, rpm, pypi, npm, gem)"] = None,
+             ) -> dict[str, Any]:
+        """Software bill of materials read straight from the image's package databases (no scanner needed)."""
+        from ..insights.packages import cyclonedx, dedupe
+        inv = self.inventory(ref, hash_files=False)
+        inv.packages = [p for p in dedupe(inv.packages) if not ecosystem or p.ecosystem == ecosystem]
+        if format == "cyclonedx":
+            return cyclonedx(ref, inv)
+        return {"image": ref, **inv.summary(),
+                "components": [{"ecosystem": p.ecosystem, "name": p.name, "version": p.version, "purl": p.purl}
+                               for p in sorted(inv.packages, key=lambda p: (p.ecosystem, p.name.lower()))]}
+
+    @op(Tier.READ)
+    def diff(self, ref: Ref, other: Annotated[str, "second image"], *,
+             top: Annotated[int, "largest file changes listed"] = 20) -> dict[str, Any]:
+        """What changed between two images: files (by content), packages (up/downgrades), and config."""
+        from ..insights.packages import config_diff, dedupe
+        from ..insights.packages import diff as inv_diff
+        a, b = self.inventory(ref, hash_files=True), self.inventory(other, hash_files=True)
+        a.packages, b.packages = dedupe(a.packages), dedupe(b.packages)
+        ca = (self.t.json("GET", f"/images/{q(ref)}/json") or {}).get("Config") or {}
+        cb = (self.t.json("GET", f"/images/{q(other)}/json") or {}).get("Config") or {}
+        return {"a": ref, "b": other, **inv_diff(a, b, top=top), "config": config_diff(ca, cb)}
+
+    @op(Tier.READ)
+    def envcheck(self, ref: Ref, *, env: Annotated[list[str] | None, "KEY=VALUE you plan to pass"] = None,
+                 env_file: Annotated[str | None, "host .env file you plan to pass"] = None,
+                 path: Annotated[list[str] | None, "extra directories to scan"] = None) -> dict[str, Any]:
+        """Preflight an image's env contract before running it: missing required vars and likely typos."""
+        from pathlib import Path
+
+        from ..insights import envcontract as ec
+        from .containers import Containers
+        cfg = (self.t.json("GET", f"/images/{q(ref)}/json") or {}).get("Config") or {}
+        provided = dict(e.partition("=")[::2] for e in cfg.get("Env") or [])
+        if env_file:
+            for line in Path(env_file).expanduser().read_text().splitlines():
+                if "=" in line and not line.lstrip().startswith("#"):
+                    k, _, v = line.partition("=")
+                    provided[k.strip().removeprefix("export ").strip()] = v
+        provided |= kv(env)
+        ctr = Containers(self.t)
+        with ctr.transient(ref, pull=False) as cid:
+            uses, scanned = ctr.env_uses(cid, cfg, path)
+        return {"image": ref, "files_scanned": len(scanned), **ec.check(uses, provided)}
 
     @op(Tier.MUTATE)
     def pull(self, ref: Ref) -> dict[str, Any]:

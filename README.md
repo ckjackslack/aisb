@@ -71,6 +71,27 @@ aisb kafka groups kfk; aisb rabbit queues rmq; aisb es search es books '{"query"
 aisb mcp [--max-tier read]                # every op as an MCP tool over stdio
 ```
 
+## Killer features
+
+Designs, algorithms and trade-offs are in [docs/design/killer-features.md](docs/design/killer-features.md).
+
+```bash
+aisb session begin; ...; aisb session rollback --yes   # undo for Docker: journaled inverses + automatic backups
+aisb system incident --since 15m --format markdown     # causal root cause, blast radius, postmortem draft
+aisb system blackbox --seconds 600; aisb system forensics api   # flight recorder, even for --rm containers
+aisb capsule create api bug.tar.gz --db-sample 0.02    # bug-in-a-file; `capsule load` recreates it anywhere
+aisb net graph --stack stack.json --format mermaid     # who really talks to whom, from socket tables
+aisb containers envcheck api                           # env contract: missing vars and typos, before start
+aisb images sbom app:2 --format cyclonedx; aisb images diff app:1 app:2
+aisb db sample pg small.sql.gz --ratio 0.05            # FK-complete subset, sequences advanced
+aisb db seed pg --rows 500 --seed 1                    # fake data that satisfies CHECKs, enums, uniques, FKs
+aisb db advise pg "select ... "                        # candidate indexes measured on a disposable clone
+aisb chaos run stack.json                              # game day: inject, observe, revert, report card
+aisb http record api --out t.jsonl; aisb http replay t.jsonl --to api-v2
+aisb system rightsize --seconds 120; aisb containers limit api --memory 256m --cpus 0.5
+aisb portal [--allow mutate]                           # local, token-protected web dashboard
+```
+
 ## Design
 
 ```
@@ -78,10 +99,14 @@ transport.py   http.client over AF_UNIX / TCP+TLS; API version negotiation; type
 streams.py     multiplexed stdout/stderr demux, JSON-stream decoder, tar contexts (.dockerignore)
 models.py      compact dataclass views + RunSpec (declarative container config -> API body)
 ops.py         @op(Tier) registry: CLI flags, JSON schemas, docs and safety policy come from one declaration
-api/*.py       containers, images, networks, volumes, system
-insights/      pure analysis: log fingerprinting, rule-based triage, snapshot diffs
+api/*.py       containers, images, networks, volumes, system, session, capsule, chaos, http, net, ...
+insights/      pure analysis: log fingerprinting, rule-based triage, snapshot diffs, dependency graph,
+               incident ranking, env contracts, package inventories, pcap/HTTP parsing, rightsizing
 services/      adapters for software inside containers: postgres, mysql/mariadb, sqlite, redis, mongo, kafka,
                rabbitmq, elasticsearch/opensearch, web servers
+rootfs.py      streaming walks over a container's filesystem via the archive API
+state.py       $AISB_HOME (0700): sessions, blackbox records
+portal.py      stdlib web UI over the registry (token, Host allowlist, no destroy)
 stack.py       stack files: validation, naming, dependency order (graphlib), config hashes
 mcp.py         MCP server (stdio JSON-RPC) generated from the registry
 cli.py         argparse generated from the registry; JSON on stdout; exit codes 0/1/2/3/4

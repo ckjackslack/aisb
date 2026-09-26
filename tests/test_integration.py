@@ -8,6 +8,7 @@ import pytest
 
 from aisb import Docker, DockerError, NotFound, get_op, invoke
 from aisb.errors import BadRequest
+from aisb.models import RunSpec
 
 IMAGE = "alpine:3.20"
 
@@ -206,3 +207,42 @@ def test_volume_backup_restore_roundtrip(docker, tmp_path):
     finally:
         for v in (src, dst):
             docker.volumes.rm(v, force=True)
+
+
+# --- killer features ----------------------------------------------------------------------------
+
+def test_limit_then_rightsize(docker, name):
+    docker.containers.run(IMAGE, "sleep", "300", name=name, detach=True)
+    res = docker.containers.limit(name, memory="64m", cpus=0.5, pids=100)
+    assert res["applied"]["Memory"] == 64 << 20
+    hc = docker.containers.inspect(name)["HostConfig"]
+    assert (hc["Memory"], hc["NanoCpus"], hc["PidsLimit"]) == (64 << 20, 500_000_000, 100)
+    (r,) = docker.system.rightsize(seconds=1, interval=0.5, container=[name])["containers"]
+    assert r["samples"] == 3 and r["limits"]["cpus"] == 0.5 and "unlimited" not in r["flags"]
+
+
+def test_session_rollback_recreates_removed_container(docker, name, tmp_path, monkeypatch):
+    monkeypatch.setenv("AISB_HOME", str(tmp_path))
+    docker.containers.run(IMAGE, "sleep", "300", name=name, detach=True, env=["API_TOKEN=s3cret"])
+    docker.session.begin()
+    try:
+        invoke(docker, get_op("containers.rm"), {"ref": name, "force": True}, confirm=True)
+        with pytest.raises(NotFound):
+            docker.containers.inspect(name)
+        out = invoke(docker, get_op("session.rollback"), {}, confirm=True).result
+        assert not out["failed"]
+        info = docker.containers.inspect(name)
+        assert info["State"]["Running"] and "API_TOKEN=s3cret" in info["Config"]["Env"]
+    finally:
+        docker.session.end()
+
+
+def test_sbom_and_envcheck(docker, name):
+    sbom = docker.images.sbom(IMAGE)
+    assert sbom["os"]["id"] == "alpine" and sbom["by_ecosystem"]["apk"] > 5
+    assert any(c["name"] == "musl" for c in sbom["components"])
+    docker.containers.create_from(RunSpec(image=IMAGE, cmd=("sh", "-c", 'echo "${DATABASE_URL:?}"'), name=name,
+                                          env=("DATABSE_URL=pg://x",)))
+    r = docker.containers.envcheck(name)
+    assert r["missing_required"][0]["var"] == "DATABASE_URL"
+    assert r["missing_required"][0]["did_you_mean"] == "DATABSE_URL"

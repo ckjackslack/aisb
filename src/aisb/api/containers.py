@@ -3,13 +3,14 @@ import re
 import shlex
 import socket
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
 from .. import insights
 from ..errors import NotFound, NotModified
-from ..models import Container, RunSpec, parse_port
+from ..models import Container, RunSpec, parse_port, parse_size
 from ..ops import Resource, Tier, op
 from ..streams import Stream, decode_output, demux, tar_path, untar
 from ..util import MANAGED, MANAGED_KEY, clip, compact, docker_time, project, q, split_cp, to_unix
@@ -365,6 +366,16 @@ class Containers(Resource, name="containers"):
             self.t.json("DELETE", f"/containers/{cid}", query={"force": True})
         return {"id": cid[:12], "exit_code": status.get("StatusCode"), **out, **warn}
 
+    @contextmanager
+    def transient(self, image: str, *, volumes: tuple[str, ...] = (), pull: bool = True) -> Iterator[str]:
+        """A never-started helper container (net-zero side effect): read an image's filesystem or a volume."""
+        cid = self.create_from(RunSpec(image=image, cmd=("aisb-transient",), volumes=volumes,
+                                       labels={"aisb.helper": "transient"}), pull=pull)
+        try:
+            yield cid
+        finally:
+            self.t.json("DELETE", f"/containers/{cid}", query={"force": True, "v": True})
+
     def create_from(self, s: RunSpec, *, pull: bool = True, auto_remove: bool = False) -> str:
         """Create (not start) a container from a RunSpec, pulling the image on demand; returns its id."""
         body = s.to_api(auto_remove=auto_remove)
@@ -408,6 +419,47 @@ class Containers(Resource, name="containers"):
                         hits += scan_text(data.decode(errors="ignore"), where)
         hits = dedupe(hits)
         return {"container": ref, "count": len(hits), "files_scanned": scanned, "findings": hits}
+
+    def env_uses(self, ref: str, image_config: dict[str, Any], extra: list[str] | None = None,
+                 budget_mib: int = 256) -> tuple[list[Any], list[str]]:
+        """Scan app dirs + entrypoint scripts of a container's filesystem for env var reads."""
+        from ..insights import envcontract as ec
+        from ..rootfs import walk
+        wd = image_config.get("WorkingDir") or ""
+        dirs = [d for d in dict.fromkeys([*(extra or []), *([wd] if wd not in ("", "/") else []), "/app", "/srv",
+                                          "/usr/src/app", "/opt/app", "/code", "/workspace", "/var/www/html"])]
+        dirs = [d for d in dirs if not any(d != o and d.startswith(o.rstrip("/") + "/") for o in dirs)]
+        files = [e for e in (image_config.get("Entrypoint") or [])[:1] if e.startswith("/")]
+        files += ["/docker-entrypoint.sh", "/entrypoint.sh", "/usr/local/bin/docker-entrypoint.sh"]
+        uses, scanned = [], []
+        for root in [*dirs, *dict.fromkeys(files)]:
+            try:
+                for m, rel, data in walk(self.t, ref, root, budget_mib=budget_mib,
+                                         want=lambda r, mm: mm.size <= 512 * 1024 and (ec.is_source(r) or r == "")):
+                    if data is not None and b"\0" not in data[:1024]:
+                        path = root.rstrip("/") + ("/" + rel if rel else "")
+                        scanned.append(path)
+                        uses += ec.extract(path, data.decode(errors="replace"))
+            except NotFound:
+                continue
+        inline = " ".join([*(image_config.get("Entrypoint") or []), *(image_config.get("Cmd") or [])])
+        if "$" in inline:  # `sh -c '... ${X:?}'` reads the environment too
+            scanned.append("<command>")
+            uses += ec.extract("<command>", inline)
+        return uses, scanned
+
+    @op(Tier.READ)
+    def envcheck(self, ref: Ref, *, path: Annotated[list[str] | None, "extra directories to scan"] = None,
+                 ) -> dict[str, Any]:
+        """Env contract: variables the code reads vs. what the container provides; flags missing ones and typos.
+
+        Works on running, stopped and created (never-started) containers: create first, check, then start.
+        """
+        from ..insights import envcontract as ec
+        info = self.t.json("GET", f"/containers/{q(ref)}/json")
+        uses, scanned = self.env_uses(ref, info.get("Config") or {}, path)
+        provided = dict(e.partition("=")[::2] for e in (info.get("Config") or {}).get("Env") or [])
+        return {"container": ref, "files_scanned": len(scanned), **ec.check(uses, provided)}
 
     @op(Tier.READ)
     def compare(self, ref: Ref, other: Annotated[str, "second container"]) -> dict[str, Any]:
@@ -491,6 +543,29 @@ class Containers(Resource, name="containers"):
     def restart(self, ref: Ref, *, grace: Annotated[int, "seconds before SIGKILL"] = 10) -> dict[str, Any]:
         """Restart a container."""
         return self._act(ref, "restart", grace)
+
+    @op(Tier.MUTATE)
+    def limit(self, ref: Ref, *, memory: Annotated[str | None, "e.g. 256m, 1g (0 = unlimited)"] = None,
+              cpus: Annotated[float | None, "e.g. 0.5 (0 = unlimited)"] = None,
+              pids: Annotated[int | None, "max processes (0 = unlimited)"] = None) -> dict[str, Any]:
+        """Change resource limits of a live container in place (no recreate); swap is capped to the new memory."""
+        if memory is None and cpus is None and pids is None:
+            raise ValueError("give at least one of --memory, --cpus, --pids")
+        hc = (self.t.json("GET", f"/containers/{q(ref)}/json") or {}).get("HostConfig") or {}
+        body: dict[str, Any] = {}
+        if memory is not None:
+            mem = parse_size(memory)
+            body["Memory"] = mem
+            # MemorySwap must be >= Memory when both are set; -1 when unlimiting keeps the daemon consistent.
+            body["MemorySwap"] = mem * 2 if mem else -1
+        if cpus is not None:
+            body["NanoCpus"] = int(cpus * 1e9)
+        if pids is not None:
+            body["PidsLimit"] = pids or -1
+        res = self.t.json("POST", f"/containers/{q(ref)}/update", body=body) or {}
+        before = {"memory": hc.get("Memory") or None, "cpus": (hc.get("NanoCpus") or 0) / 1e9 or None,
+                  "pids": hc.get("PidsLimit") or None}
+        return {"ref": ref, "before": before, "applied": body, "warnings": res.get("Warnings") or []}
 
     @op(Tier.MUTATE, name="exec")
     def exec_(self, ref: Ref, *cmd: Cmd, workdir: str | None = None, user: str | None = None,

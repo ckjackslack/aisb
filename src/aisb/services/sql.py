@@ -58,7 +58,7 @@ class SQL(Adapter):
         raise NotImplementedError
 
     def dump(self, sink: Callable[[bytes], object], *, database: str | None = None, schema_only: bool = False,
-             tables: list[str] | None = None) -> None:
+             tables: list[str] | None = None, clean: bool = False) -> None:
         raise NotImplementedError
 
     def activity(self) -> dict[str, Any]:
@@ -70,6 +70,27 @@ class SQL(Adapter):
 
     def ident(self, name: str) -> str:
         return ".".join('"' + part.replace('"', '""') + '"' for part in name.split("."))
+
+    def literal(self, value: Any) -> str:
+        if value is None:
+            return "NULL"
+        if isinstance(value, bool):
+            return "TRUE" if value else "FALSE"
+        if isinstance(value, (int, float)):
+            return repr(value)
+        if isinstance(value, bytes):
+            return "X'" + value.hex() + "'"
+        return lit(str(value), backslash=self.dialect == "mysql")
+
+    random_fn = "random()"
+
+    def relations(self, database: str | None = None) -> "Relations":
+        """Primary keys and foreign keys (composite-aware) of every user table."""
+        raise NotImplementedError
+
+    def sequences(self, database: str | None = None) -> list[tuple[str, str, str]]:
+        """(table, column, sequence) for serial/identity columns whose counters must follow loaded data."""
+        return []
 
     def count(self, table: str, database: str | None = None) -> int:
         r = self.query(f"select count(*) as n from {self.ident(table)}", database=database, seconds=120)
@@ -200,8 +221,9 @@ class Postgres(SQL):
         return {"table": table, "columns": cols, "constraints": constraints, "indexes": indexes}
 
     def dump(self, sink: Callable[[bytes], object], *, database: str | None = None, schema_only: bool = False,
-             tables: list[str] | None = None) -> None:
+             tables: list[str] | None = None, clean: bool = False) -> None:
         argv = ["pg_dump", *self._conn(database), "--no-owner", "--no-privileges",
+                *(["--clean", "--if-exists"] if clean else []),
                 *(["--schema-only"] if schema_only else []), *[a for t in tables or [] for a in ("-t", t)]]
         self._stream(argv, sink, self._env())
 
@@ -230,6 +252,35 @@ class Postgres(SQL):
                   where state <> 'idle' and pid <> pg_backend_pid() and backend_type = 'client backend') a))""")
 
     _USER_SCHEMAS = "not in ('pg_catalog', 'information_schema') and {col} not like 'pg_toast%'"
+
+    def relations(self, database: str | None = None) -> "Relations":
+        tables = sorted(self.schema(database))
+        pk = self.query(
+            "select n.nspname || '.' || c.relname, a.attname from pg_constraint con "
+            "join pg_class c on c.oid = con.conrelid join pg_namespace n on n.oid = c.relnamespace "
+            "cross join lateral unnest(con.conkey) with ordinality k(attnum, ord) "
+            "join pg_attribute a on a.attrelid = c.oid and a.attnum = k.attnum "
+            f"where con.contype = 'p' and n.nspname {self._USER_SCHEMAS.format(col='n.nspname')} order by 1, k.ord",
+            database=database)
+        fk = self.query(
+            "select con.conname, n.nspname || '.' || c.relname, a.attname, n2.nspname || '.' || c2.relname, a2.attname "
+            "from pg_constraint con join pg_class c on c.oid = con.conrelid join pg_namespace n on n.oid = c.relnamespace "
+            "join pg_class c2 on c2.oid = con.confrelid join pg_namespace n2 on n2.oid = c2.relnamespace "
+            "cross join lateral unnest(con.conkey, con.confkey) with ordinality k(ck, pk, ord) "
+            "join pg_attribute a on a.attrelid = c.oid and a.attnum = k.ck "
+            "join pg_attribute a2 on a2.attrelid = c2.oid and a2.attnum = k.pk "
+            f"where con.contype = 'f' and n.nspname {self._USER_SCHEMAS.format(col='n.nspname')} order by 1, k.ord",
+            database=database)
+        return Relations.build(tables, pk.rows, fk.rows)
+
+    def sequences(self, database: str | None = None) -> list[tuple[str, str, str]]:
+        r = self.query(
+            "select n.nspname || '.' || c.relname, a.attname, pg_get_serial_sequence(quote_ident(n.nspname) || '.' || "
+            "quote_ident(c.relname), a.attname) from pg_attribute a join pg_class c on c.oid = a.attrelid "
+            "join pg_namespace n on n.oid = c.relnamespace where c.relkind = 'r' and a.attnum > 0 and not a.attisdropped "
+            f"and n.nspname {self._USER_SCHEMAS.format(col='n.nspname')} and pg_get_serial_sequence("
+            "quote_ident(n.nspname) || '.' || quote_ident(c.relname), a.attname) is not null", database=database)
+        return [tuple(row) for row in r.rows]  # type: ignore[misc]
 
     def schema(self, database: str | None = None) -> dict[str, dict[str, Any]]:
         cols = self.query(
@@ -373,8 +424,8 @@ class MySQL(SQL):
         return {"table": table, "columns": cols, "indexes": indexes, "foreign_keys": fks}
 
     def dump(self, sink: Callable[[bytes], object], *, database: str | None = None, schema_only: bool = False,
-             tables: list[str] | None = None) -> None:
-        db = database or self.database()
+             tables: list[str] | None = None, clean: bool = False) -> None:
+        db = database or self.database()  # mysqldump always emits DROP TABLE IF EXISTS, so `clean` is implied
         if not db:
             raise ValueError("mysql dump needs --database (no MYSQL_DATABASE in the container env)")
         args = ["-u", self.user(), "--single-transaction", "--routines", "--triggers", "--no-tablespaces",
@@ -408,6 +459,18 @@ class MySQL(SQL):
 
     def ident(self, name: str) -> str:
         return ".".join("`" + part.replace("`", "``") + "`" for part in name.split("."))
+
+    random_fn = "rand()"
+
+    def relations(self, database: str | None = None) -> "Relations":
+        tables = sorted(self.schema(database))
+        pk = self.query("select table_name, column_name from information_schema.key_column_usage "
+                        "where table_schema = database() and constraint_name = 'PRIMARY' order by 1, ordinal_position",
+                        database=database)
+        fk = self.query("select constraint_name, table_name, column_name, referenced_table_name, referenced_column_name "
+                        "from information_schema.key_column_usage where table_schema = database() "
+                        "and referenced_table_name is not null order by 1, ordinal_position", database=database)
+        return Relations.build(tables, pk.rows, fk.rows)
 
     def schema(self, database: str | None = None) -> dict[str, dict[str, Any]]:
         cols = self.query(
@@ -468,6 +531,23 @@ class SQLite(SQL):
                 shutil.rmtree(tmp, ignore_errors=True)
         return _timed(go)
 
+    def relations(self, database: str | None = None) -> "Relations":
+        tmp, conn = self._copy()
+        try:
+            tables = [t for (t,) in conn.execute(
+                "select name from sqlite_master where type = 'table' and name not like 'sqlite_%' order by name")]
+            pk, fk = [], []
+            for t in tables:
+                pk += [[t, name] for _, name, *_ in sorted(
+                    (r for r in conn.execute("select pk, name from pragma_table_info(?)", (t,)) if r[0]),
+                    key=lambda r: r[0])]
+                fk += [[f"{t}#{i}", t, frm, parent, to or ""] for i, _, parent, frm, to in conn.execute(
+                    'select id, seq, "table", "from", "to" from pragma_foreign_key_list(?) order by id, seq', (t,))]
+            return Relations.build(tables, pk, fk)
+        finally:
+            conn.close()
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def schema(self, database: str | None = None) -> dict[str, dict[str, Any]]:
         tmp, conn = self._copy()  # one copy for the whole catalog, not one per query
         try:
@@ -493,6 +573,55 @@ class SQLite(SQL):
         for c in columns:
             c["nullable"] = bool(c["nullable"])
         return {"table": table, "columns": columns, "indexes": rec(idx), "foreign_keys": rec(fks)}
+
+
+@dataclass(slots=True)
+class ForeignKey:
+    name: str
+    child: str
+    columns: tuple[str, ...]
+    parent: str
+    ref: tuple[str, ...]
+
+
+@dataclass(slots=True)
+class Relations:
+    tables: list[str]
+    pk: dict[str, tuple[str, ...]]
+    fks: list[ForeignKey]
+
+    @classmethod
+    def build(cls, tables: list[str], pk_rows: list[list[Any]], fk_rows: list[list[Any]]) -> "Relations":
+        pk: dict[str, list[str]] = {}
+        for t, col in pk_rows:
+            pk.setdefault(t, []).append(col)
+        grouped: dict[str, list[list[Any]]] = {}
+        for name, child, col, parent, ref in fk_rows:
+            grouped.setdefault(f"{child}/{name}", []).append([name, child, col, parent, ref])
+        fks = []
+        for rows in grouped.values():
+            name, child, _, parent, _ = rows[0]
+            ref = tuple(r[4] for r in rows)
+            if not all(ref):  # sqlite: FK without explicit columns references the parent's PK
+                ref = tuple(pk.get(parent, ()))
+            fks.append(ForeignKey(name, child, tuple(r[2] for r in rows), parent, ref))
+        return cls(tables, {t: tuple(c) for t, c in pk.items()}, fks)
+
+    def parents_first(self) -> list[str]:
+        import graphlib
+        ts = graphlib.TopologicalSorter({t: set() for t in self.tables})
+        for fk in self.fks:
+            if fk.child != fk.parent and fk.parent in self.tables:
+                ts.add(fk.child, fk.parent)
+        try:
+            return list(ts.static_order())
+        except graphlib.CycleError:
+            return list(self.tables)  # FK checks are disabled during load, so any order works
+
+    def roots(self) -> list[str]:
+        """Tables no FK points at (facts like order_items), plus unconnected tables."""
+        referenced = {fk.parent for fk in self.fks if fk.parent != fk.child}
+        return [t for t in self.tables if t not in referenced]
 
 
 def _sqlite_schema(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:

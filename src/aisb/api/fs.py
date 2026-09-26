@@ -9,8 +9,8 @@ import tarfile
 from collections.abc import Iterator
 from typing import Annotated, Any, Literal
 
-from ..errors import APIError
 from ..ops import Resource, Tier, op
+from ..rootfs import ChunkReader, relative
 from ..util import clip, q
 
 Ref = Annotated[str, "container name or id (running or stopped)"]
@@ -18,29 +18,6 @@ Budget = Annotated[int, "abort after streaming this many MiB of archive"]
 
 _TYPES = {tarfile.DIRTYPE: "dir", tarfile.SYMTYPE: "link", tarfile.LNKTYPE: "hardlink",
           tarfile.CHRTYPE: "char", tarfile.BLKTYPE: "block", tarfile.FIFOTYPE: "fifo"}
-
-
-class ChunkReader(io.RawIOBase):
-    """File-like view of a byte-chunk iterator, with a hard byte budget."""
-
-    def __init__(self, chunks: Iterator[bytes], budget: int) -> None:
-        self._chunks, self._buf, self.read_total, self._budget = chunks, b"", 0, budget
-
-    def readable(self) -> bool:
-        return True
-
-    def readinto(self, b: Any) -> int:
-        while not self._buf:
-            try:
-                self._buf = next(self._chunks)
-            except StopIteration:
-                return 0
-            self.read_total += len(self._buf)
-            if self.read_total > self._budget:
-                raise APIError(f"archive exceeded {self._budget >> 20} MiB; narrow the path or raise --max-mb")
-        n = min(len(b), len(self._buf))
-        b[:n], self._buf = self._buf[:n], self._buf[n:]
-        return n
 
 
 def _entry(m: tarfile.TarInfo, rel: str) -> dict[str, Any]:
@@ -63,9 +40,7 @@ class Fs(Resource, name="fs"):
         root = path.rstrip("/").rsplit("/", 1)[-1]
         with tarfile.open(fileobj=reader, mode="r|") as tar:
             for m in tar:
-                name = m.name.lstrip("./")
-                rel = name[len(root) + 1:] if root and name.startswith(root + "/") else "" if name == root else name
-                yield m, rel, tar
+                yield m, relative(m.name, root), tar
 
     @op(Tier.READ)
     def stat(self, ref: Ref, path: str) -> dict[str, Any]:

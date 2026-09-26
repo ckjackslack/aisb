@@ -294,6 +294,147 @@ class Db(Resource, name="db"):
                          f"aisb containers rm {name} --force --dry-run"]}
 
     @op(Tier.READ)
+    def sample(self, ref: Ref, out: Annotated[str, "host .sql / .sql.gz file"], *,
+               ratio: Annotated[float, "fraction of each root table to take"] = 0.01,
+               root: Annotated[list[str] | None, "root tables (default: tables nothing references)"] = None,
+               max_rows: Annotated[int, "cap per root table"] = 1000,
+               with_children: Annotated[bool, "also take the roots' direct child rows"] = False,
+               data_only: Annotated[bool, "omit the schema"] = False,
+               database: Database = None, engine: Engine = None, path: DbPath = None) -> dict[str, Any]:
+        """Referentially complete subset: sample root tables, pull in every parent row their FKs need (to a
+        fixpoint), and write schema + INSERTs in load order. Load it with `db restore` or into a clone."""
+        from ..services import subset
+        db = sql_adapter(self, ref, engine, path)
+        rel = db.relations(database)
+        started = time.monotonic()
+        sub = subset.plan(db, rel, ratio=ratio, roots=root, max_rows=max_rows, with_children=with_children,
+                          database=database)
+        statements, counts = subset.export(db, rel, sub, database=database)
+        schema = b""
+        if not data_only:
+            if isinstance(db, SQLite):
+                schema = "\n".join(f"{s};" for (s,) in db.query(
+                    "select sql from sqlite_master where sql is not null and name not like 'sqlite_%' "
+                    "order by type = 'index', rowid").rows).encode()
+            else:
+                buf = bytearray()
+                db.dump(buf.extend, database=database, schema_only=True)
+                schema = bytes(buf)
+        body = schema + b"\n" + "\n".join(statements).encode() + b"\n"
+        target = Path(out).expanduser()
+        target.write_bytes(gzip.compress(body) if target.suffix == ".gz" else body)
+        return {"engine": db.kind, "written": str(target), "bytes": target.stat().st_size,
+                "roots": root or rel.roots(), "rows": counts, "total_rows": sum(counts.values()),
+                "seconds": round(time.monotonic() - started, 2), "notes": sub.notes,
+                "next": [f"aisb db restore NEWDB {out} --dry-run  (or load into a fresh container)"]}
+
+    @op(Tier.MUTATE)
+    def seed(self, ref: Ref, *, rows: Annotated[int, "rows per table"] = 100,
+             table: Annotated[list[str] | None, "only these tables (their empty required parents are seeded too)"] = None,
+             seed: Annotated[int | None, "random seed for reproducible data"] = None,
+             database: Database = None,
+             engine: Annotated[Literal["postgres", "mysql"] | None, "override auto-detection"] = None) -> dict[str, Any]:
+        """Insert synthetic rows that satisfy the schema: types, lengths, precision, enums, simple CHECKs,
+        uniqueness and foreign keys (parents first). Preview with --dry-run."""
+        from ..services import seed as seeding
+        db = adapter(self, ref, SQL, engine=engine)
+        rel = db.relations(database)
+        metas = seeding.introspect(db, database)
+        if table and (unknown := set(table) - set(metas)):
+            raise ValueError(f"unknown tables: {sorted(unknown)} "
+                             f"(names are {'schema.table' if db.dialect == 'postgres' else 'table'})")
+        started = time.monotonic()
+        report = seeding.seed(db, rel, metas, rows=rows, tables=table, seed_value=seed, database=database)
+        return {"engine": db.kind, "rows": report["tables"], "sample": report["sample"],
+                "seconds": round(time.monotonic() - started, 2)}
+
+    @op(Tier.MUTATE)
+    def advise(self, ref: Ref, sql: Annotated[str | None, "a slow SELECT (omit for a schema index report)"] = None, *,
+               runs: Annotated[int, "timed runs per variant (median)"] = 3, database: Database = None,
+               keep_clone: Annotated[bool, "keep the temporary clone for further experiments"] = False) -> dict[str, Any]:
+        """Postgres index advisor that proves itself: on a disposable clone, EXPLAIN ANALYZE the query, derive index
+        candidates from the plan, create each one, re-measure, and report the measured speedups + production DDL.
+        Without SQL: unindexed foreign keys and never-used indexes."""
+        from ..services import advise as adv
+        from ..services.sql import Postgres
+        db = adapter(self, ref, SQL)
+        if not isinstance(db, Postgres):
+            raise ValueError("db advise supports Postgres (EXPLAIN ANALYZE JSON plans)")
+        if sql is None:
+            return {"engine": db.kind, **self._index_report(db, database)}
+        if not re.match(r"\s*(select|with)\b", sql, re.I):
+            raise ValueError("advise measures read queries only (SELECT / WITH)")
+        clone = f"{ref}-advise-{int(time.time()) % 100000}"
+        self.clone(ref, clone, database=database)
+        if self.t.planning:
+            return {"clone": clone}
+        try:
+            cdb = adapter(self, clone, SQL)
+
+            def measure() -> tuple[float, dict[str, Any]]:
+                times, plan = [], {}
+                for _ in range(max(1, runs)):
+                    raw = cdb.query(f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {sql}", database=database, seconds=600)
+                    doc = json.loads(raw.rows[0][0])[0]
+                    times.append(doc["Execution Time"])
+                    plan = doc["Plan"]
+                return sorted(times)[len(times) // 2], plan
+
+            cdb.query("ANALYZE", readonly=False, database=database, seconds=600)
+            base_ms, base_plan = measure()
+            existing = {row[0] for row in cdb.query("select indexdef from pg_indexes", database=database).rows}
+            tried = []
+            for i, cand in enumerate(adv.candidates(base_plan)[:5]):
+                lead = f"({', '.join(cand.columns)})"
+                if any(f"USING btree {lead}" in d for d in existing):
+                    continue
+                name = f"aisb_advise_{i}"
+                cdb.query(f"CREATE INDEX {name} ON {cand.relation} ({', '.join(chr(34) + c + chr(34) for c in cand.columns)})",
+                          readonly=False, database=database, seconds=600)
+                cdb.query(f"ANALYZE {cand.relation}", readonly=False, database=database, seconds=600)
+                ms, _ = measure()
+                cdb.query(f"DROP INDEX {name}", readonly=False, database=database)
+                tried.append({"index": cand.ddl, "reason": cand.reason, "ms": round(ms, 2),
+                              "speedup": round(base_ms / ms, 2) if ms else None})
+            winners = [t for t in tried if (t["speedup"] or 0) >= 1.2]
+            combined = None
+            if len(winners) > 1:
+                for i, w in enumerate(winners):
+                    cdb.query(w["index"].replace("CONCURRENTLY ", "").replace("CREATE INDEX", f"CREATE INDEX aisb_w{i}", 1),
+                              readonly=False, database=database, seconds=600)
+                cdb.query("ANALYZE", readonly=False, database=database, seconds=600)
+                ms, _ = measure()
+                combined = {"ms": round(ms, 2), "speedup": round(base_ms / ms, 2) if ms else None}
+            return {"engine": db.kind, "baseline_ms": round(base_ms, 2), "hot_nodes": adv.hot_nodes(base_plan),
+                    "candidates": tried, "recommended": [w["index"] for w in winners], "combined": combined,
+                    "verdict": (f"{len(winners)} index(es) measured faster; best {max(w['speedup'] for w in winners)}x"
+                                if winners else "no candidate index made this query meaningfully faster"),
+                    "clone": clone if keep_clone else None}
+        finally:
+            if not keep_clone:
+                Containers(self.t).t.json("DELETE", f"/containers/{q(clone)}", query={"force": True, "v": True})
+
+    def _index_report(self, db: SQL, database: str | None) -> dict[str, Any]:
+        unindexed = db.query(
+            "select c.conrelid::regclass::text as table, string_agg(a.attname, ', ' order by k.ord) as columns, "
+            "c.confrelid::regclass::text as references from pg_constraint c "
+            "cross join lateral unnest(c.conkey) with ordinality k(attnum, ord) "
+            "join pg_attribute a on a.attrelid = c.conrelid and a.attnum = k.attnum where c.contype = 'f' "
+            "and not exists (select 1 from pg_index i where i.indrelid = c.conrelid "
+            "and (i.indkey::int2[])[0:cardinality(c.conkey) - 1] @> c.conkey) group by c.oid, c.conrelid, c.confrelid",
+            database=database)
+        unused = db.query(
+            "select s.relname as table, s.indexrelname as index, pg_relation_size(s.indexrelid) as bytes "
+            "from pg_stat_user_indexes s join pg_index i on i.indexrelid = s.indexrelid "
+            "where s.idx_scan = 0 and not i.indisunique order by 3 desc limit 20", database=database)
+        rec = lambda r: [dict(zip(r.columns, row)) for row in infer(r.columns, r.rows)]  # noqa: E731
+        fks = rec(unindexed)
+        for f in fks:
+            f["ddl"] = f"CREATE INDEX CONCURRENTLY ON {f['table']} ({f['columns']});"
+        return {"unindexed_foreign_keys": fks, "unused_indexes": rec(unused),
+                "note": "unused = never scanned since stats reset; check replicas before dropping"}
+
+    @op(Tier.READ)
     def activity(self, ref: Ref) -> dict[str, Any]:
         """What the database is doing now: running queries (longest first), blockers, connections, cache hit ratio."""
         db = adapter(self, ref, SQL)

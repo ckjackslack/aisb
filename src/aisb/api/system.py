@@ -1,13 +1,17 @@
+import collections
+import dataclasses
+import re
+import threading
 import time
 from typing import Annotated, Any, Literal
 
-from ..errors import NotFound
+from ..errors import DockerError, NotFound
 
 from .. import insights
 from ..insights import snapshot as snap
 from ..ops import Resource, Tier, op
-from ..streams import iter_jsonl
-from ..util import MANAGED, filters, project, q, to_unix
+from ..streams import demux, iter_jsonl
+from ..util import MANAGED, docker_time, filters, project, q, to_unix
 
 _EVENT_ATTRS = ("name", "image", "exitCode", "signal", "container")
 
@@ -47,6 +51,29 @@ def compact_event(e: dict[str, Any]) -> dict[str, Any]:
 def _reclaimed(r: Any, key: str) -> dict[str, Any]:
     r = r or {}
     return {"deleted": len(r.get(key) or []), "space_reclaimed": r.get("SpaceReclaimed", 0)}
+
+
+_HOST_REF = re.compile(r"(?:^|[/@=,\s])([a-z0-9][a-z0-9_.-]*):(\d{2,5})\b|//([a-z0-9][a-z0-9_.-]*)(?=[/:?]|$)")
+
+
+def config_dependencies(t: Any, rows: list[dict[str, Any]]) -> dict[str, set[str]]:
+    """Container -> containers its env points at (by name or network alias), e.g. REDIS_URL=redis://cache:6379."""
+    infos = {(r.get("Names") or ["?"])[0].lstrip("/"): t.json("GET", f"/containers/{r['Id']}/json") for r in rows}
+    alias: dict[str, str] = {}
+    for name, info in infos.items():
+        alias[name] = name
+        for ep in ((info.get("NetworkSettings") or {}).get("Networks") or {}).values():
+            for a in ep.get("Aliases") or []:
+                alias.setdefault(a, name)
+    out: dict[str, set[str]] = {}
+    for name, info in infos.items():
+        for entry in (info.get("Config") or {}).get("Env") or []:
+            value = entry.partition("=")[2]
+            for m in _HOST_REF.finditer(value):
+                host = m.group(1) or m.group(3)
+                if host in alias and alias[host] != name:
+                    out.setdefault(name, set()).add(alias[host])
+    return out
 
 
 class System(Resource, name="system"):
@@ -193,6 +220,227 @@ class System(Resource, name="system"):
         worst = [n for n, (v, *_) in prev.items() if v == "failing"]
         return {"polls": polls, "seconds": round(time.monotonic() - begin, 1), "changes": events,
                 "failing_now": worst, "next": [f"aisb containers doctor {n}" for n in worst]}
+
+    @op(Tier.READ)
+    def incident(self, *, since: Annotated[str, "window start: unix ts, ISO time, or relative like 30m"] = "30m",
+                 format: Annotated[Literal["json", "markdown"], "markdown = postmortem draft"] = "json",
+                 log_lines: Annotated[int, "log lines scanned per container"] = 2000) -> Any:
+        """Causal incident report: correlate events, first error signals and observed dependencies into a
+        root cause, blast radius and chain (with a postmortem draft in markdown)."""
+        from ..insights import incident as inc
+        from ..insights.logs import level_of, template
+        from .containers import Containers
+        from .net import Net
+        ctr = Containers(self.t)
+        start, now = to_unix(since), time.time()
+        signals: list[inc.Signal] = []
+        for e in self.events(since=since, until="now", limit=2000):
+            action, name = str(e.get("action", "")), e.get("name") or e.get("id")
+            if e.get("type") != "container" or not name:
+                continue
+            if action == "oom":
+                signals.append(inc.Signal(e["time"], name, "event", "critical", "OOM killed"))
+            elif action == "die" and e.get("exitCode") not in (None, "0", "143"):
+                signals.append(inc.Signal(e["time"], name, "event", "critical", f"died (exit {e.get('exitCode')})"))
+            elif action.startswith("health_status: unhealthy"):
+                signals.append(inc.Signal(e["time"], name, "health", "critical", "healthcheck unhealthy"))
+            elif action in ("kill", "restart"):
+                signals.append(inc.Signal(e["time"], name, "event", "info", action))
+        rows = self.t.json("GET", "/containers/json", query={"all": True}) or []
+        causes: dict[str, str | None] = {}
+        for r in rows:
+            name = (r.get("Names") or ["?"])[0].lstrip("/")
+            seen: set[str] = set()
+            try:
+                text = ctr._text(r["Id"], tail=log_lines, since=str(int(start)), timestamps=True)
+            except Exception:  # noqa: BLE001 - a container vanishing mid-scan must not sink the report
+                continue
+            for line in text.splitlines():
+                ts, _, msg = line.partition(" ")
+                when = docker_time(ts)
+                lvl = level_of(msg)
+                if when is None or lvl not in ("error", "warn"):
+                    continue
+                key = template(msg)
+                if key not in seen and len(seen) < 5:
+                    seen.add(key)
+                    signals.append(inc.Signal(when, name, "log", "critical" if lvl == "error" else "warning", msg[:200]))
+        failing = {s.container for s in signals if s.severity == "critical"}
+        for name in failing:
+            try:
+                causes[name] = ctr.doctor(name, tail=300, stats=False).get("likely_cause")
+            except Exception:  # noqa: BLE001
+                causes[name] = None
+        try:
+            from ..insights import graph
+            deps = graph.depends_on(graph.build(Net(self.t).observe(samples=1)))
+        except Exception:  # noqa: BLE001
+            deps = {}
+        # A dead dependency has no live connections left, so also use configured targets (env URLs/host:port).
+        sources = ["traffic"] if deps else []
+        if configured := config_dependencies(self.t, rows):
+            sources.append("config")
+        for name, targets in configured.items():
+            deps.setdefault(name, set()).update(targets)
+        report = inc.analyze(signals, deps, likely_causes=causes, evidence="+".join(sources) or "temporal")
+        report["window"] = {"from": int(start), "to": int(now)}
+        nxt = [f"aisb containers doctor {c}" for c in report.get("chain", [])[:3]] + \
+              ([f"aisb containers timeline {' '.join(report['chain'][:4])} --since {since}"] if report.get("chain") else [])
+        report["next"] = nxt
+        if format == "markdown":
+            return {"output": inc.postmortem(report, window=f"last {since}", next_steps=nxt), "summary": report["summary"]}
+        return report
+
+    @op(Tier.READ)
+    def blackbox(self, *, seconds: Annotated[float, "how long to record"] = 600.0,
+                 max_records: Annotated[int, "stop after this many captures"] = 100,
+                 log_lines: Annotated[int, "log lines kept per container (ring buffer)"] = 500) -> dict[str, Any]:
+        """Flight recorder: keeps a ring buffer of every container's logs from the moment it is *created*, and
+        saves config + buffer when it dies/OOMs/is killed. Works even for --rm containers, whose logs Docker
+        refuses to serve once they die. Read records back with `system forensics`."""
+        from .. import state
+        from ..transport import redact_env
+        out_dir = state.home("blackbox")
+        buffers: dict[str, collections.deque[str]] = {}
+        configs: dict[str, dict[str, Any]] = {}
+
+        def follow(cid: str) -> None:
+            buf = buffers.setdefault(cid, collections.deque(maxlen=log_lines))
+            try:
+                info = self.t.json("GET", f"/containers/{cid}/json")
+                configs[cid] = info
+                chunks = self.t.stream("GET", f"/containers/{cid}/logs", query={
+                    "follow": True, "stdout": True, "stderr": True, "timestamps": True}, timeout=None)
+                pending = ""
+                if (info.get("Config") or {}).get("Tty"):
+                    source = (c.decode(errors="replace") for c in chunks)
+                else:
+                    source = (d.decode(errors="replace") for _, d in demux(chunks))
+                for text in source:
+                    *lines, pending = (pending + text).split("\n")
+                    buf.extend(lines)
+                if pending:
+                    buf.append(pending)
+            except Exception:  # noqa: BLE001 - a follower dying must never take the recorder down
+                pass
+
+        def attach(cid: str) -> None:
+            if cid not in buffers:
+                buffers[cid] = collections.deque(maxlen=log_lines)
+                threading.Thread(target=follow, args=(cid,), daemon=True).start()
+
+        for r in self.t.json("GET", "/containers/json") or []:
+            attach(r["Id"])
+        captured: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        query = {"since": int(time.time()), "until": int(time.time() + seconds),
+                 "filters": {"type": ["container"], "event": ["create", "start", "die", "oom", "kill"]}}
+        for e in iter_jsonl(self.t.stream("GET", "/events", query=query, timeout=None)):
+            cid = (e.get("Actor") or {}).get("ID") or e.get("id") or ""
+            attrs = (e.get("Actor") or {}).get("Attributes") or {}
+            action = e.get("Action") or e.get("status")
+            if action in ("create", "start"):
+                attach(cid)  # following a created container attaches before it runs: nothing is missed
+                continue
+            try:
+                info = self.t.json("GET", f"/containers/{cid}/json")
+            except DockerError:
+                info = configs.get(cid) or {"Name": "/" + attrs.get("name", cid[:12]), "Config": {}, "State": {}}
+            info.setdefault("State", {})
+            if action == "die" and attrs.get("exitCode") is not None:
+                info["State"] = {**info["State"], "Status": "exited", "Running": False,
+                                 "ExitCode": int(attrs["exitCode"])}
+            if action == "oom":
+                info["State"] = {**info["State"], "OOMKilled": True}
+            name = attrs.get("name") or (info.get("Name") or "").lstrip("/") or cid[:12]
+            key = (name, f"{info['State'].get('StartedAt')}:{action}")
+            if key in seen:
+                continue
+            seen.add(key)
+            time.sleep(0.2)  # let the follower drain the last lines
+            cfg = info.get("Config") or {}
+            info["Config"] = {**cfg, "Env": redact_env(cfg.get("Env") or [])}
+            record = {"container": name, "event": action, "at": e.get("time"),
+                      "exit_code": info["State"].get("ExitCode"), "inspect": info,
+                      "logs": "\n".join(buffers.get(cid) or [])}
+            path = state.write_json(out_dir / f"{name}-{int(e.get('time') or time.time())}-{action}.json", record)
+            captured.append({"container": name, "event": action, "exit_code": record["exit_code"],
+                             "log_lines": len(buffers.get(cid) or []), "record": str(path)})
+            if len(captured) >= max_records:
+                break
+        return {"seconds": seconds, "captured": captured, "stored_in": str(out_dir)}
+
+    @op(Tier.READ)
+    def forensics(self, name: Annotated[str | None, "container name (omit to list records)"] = None, *,
+                  limit: Annotated[int, "records shown"] = 20) -> Any:
+        """Read blackbox records; with a name, run doctor on the last captured state of a container that's gone."""
+        from .. import insights, state
+        records = sorted(state.home("blackbox").glob(f"{name or '*'}-*.json"), key=lambda p: p.stat().st_mtime,
+                         reverse=True)
+        if not name:
+            out = []
+            for p in records[:limit]:
+                r = state.read_json(p) or {}
+                out.append({"container": r.get("container"), "event": r.get("event"), "at": r.get("at"),
+                            "exit_code": r.get("exit_code"), "record": str(p)})
+            return out
+        if not records:
+            raise ValueError(f"no blackbox record for {name!r} (run `aisb system blackbox` while it fails)")
+        r = state.read_json(records[0])
+        lines = tuple(line.partition(" ")[2] for line in (r.get("logs") or "").splitlines())
+        report = insights.diagnose(insights.Facts(name, r["inspect"], logs=lines))
+        return {"record": str(records[0]), "captured_event": r.get("event"), "records_for_container": len(records),
+                **report, "log_patterns": [
+                    {k: p[k] for k in ("level", "count", "template")}
+                    for p in insights.fingerprint(list(lines), top=5, min_level="warn")["top"]]}
+
+    @op(Tier.READ)
+    def rightsize(self, *, seconds: Annotated[float, "sampling window"] = 60,
+                  interval: Annotated[float, "seconds between samples"] = 5,
+                  headroom: Annotated[float, "safety margin over observed peak/p95"] = 0.3,
+                  container: Annotated[list[str] | None, "only these containers (default: all running)"] = None,
+                  ) -> dict[str, Any]:
+        """Sample live usage and recommend memory/CPU/pids limits per container, flagging at-risk,
+        over-provisioned, unlimited and idle ones, with ready `containers limit` commands."""
+        from ..insights import rightsize as rs
+        rows = self.t.json("GET", "/containers/json") or []
+        names = {(r.get("Names") or ["?"])[0].lstrip("/"): r["Id"] for r in rows}
+        wanted = container or sorted(names)
+        unknown = [n for n in wanted if n not in names]
+        if unknown:
+            raise ValueError(f"not running: {', '.join(unknown)}")
+        series: dict[str, list[rs.Sample]] = {n: [] for n in wanted}
+
+        def sample(n: str) -> None:
+            try:
+                raw = self.t.json("GET", f"/containers/{names[n]}/stats", query={"stream": False, "one-shot": True})
+                series[n].append(rs.Sample.from_api(raw or {}, time.monotonic()))
+            except DockerError:
+                pass  # container went away mid-window
+
+        rounds = max(round(seconds / interval), 1) + 1  # samples at 0, interval, ..., seconds
+        for i in range(rounds):
+            if i:
+                time.sleep(interval)
+            workers = [threading.Thread(target=sample, args=(n,), daemon=True) for n in wanted]
+            for w in workers:
+                w.start()
+            for w in workers:
+                w.join()
+        out = []
+        for n in wanted:
+            if len(series[n]) < 2:
+                out.append({"name": n, "error": "not enough samples (stopped during the window?)"})
+                continue
+            hc = (self.t.json("GET", f"/containers/{names[n]}/json") or {}).get("HostConfig") or {}
+            out.append(dataclasses.asdict(rs.recommend(n, series[n], rs.Limits.from_host_config(hc),
+                                                       headroom=headroom)))
+        flagged = [r for r in out if r.get("command")]
+        return {"window_s": seconds, "interval_s": interval, "headroom": headroom, "containers": out,
+                "note": "recommendations only reflect this window; sample under representative load",
+                "commands": [r["command"] for r in flagged],
+                "summary": {f: sum(f in r.get("flags", []) for r in out)
+                            for f in ("at-risk", "over-provisioned", "unlimited", "idle")}}
 
     @op(Tier.READ)
     def snapshot(self) -> dict[str, Any]:

@@ -1,6 +1,6 @@
 ---
 name: docker
-description: Inspect, diagnose, and manage Docker containers, images, networks, and volumes, and operate the services inside them (Postgres, MySQL/MariaDB, SQLite, Redis, MongoDB, nginx and other web servers), through the stdlib-only `aisb` CLI (JSON output, tiered safety). Use when the user asks about running containers, docker logs, why a container is crashing / restarting / unhealthy / OOM-killed, port or network problems, disk usage and cleanup, building or running images, executing a command in a container, querying or dumping a database in a container, inspecting Redis keys, checking what queries are running or blocked, reloading nginx, calling a container's HTTP endpoint, reading files from a container, bringing up a multi-service dev stack, rehearsing a migration on a copy of a database, comparing schemas or container configs, debugging why one container can't reach another, security-auditing containers or finding leaked secrets in images, backing up volumes, slimming images, watching a deploy, or inspecting Kafka topics/consumer lag, RabbitMQ queues or Elasticsearch indices.
+description: Inspect, diagnose, and manage Docker containers, images, networks, and volumes, and operate the services inside them (Postgres, MySQL/MariaDB, SQLite, Redis, MongoDB, nginx and other web servers), through the stdlib-only `aisb` CLI (JSON output, tiered safety). Use when the user asks about running containers, docker logs, why a container is crashing / restarting / unhealthy / OOM-killed, port or network problems, disk usage and cleanup, building or running images, executing a command in a container, querying or dumping a database in a container, inspecting Redis keys, checking what queries are running or blocked, reloading nginx, calling a container's HTTP endpoint, reading files from a container, bringing up a multi-service dev stack, rehearsing a migration on a copy of a database, comparing schemas or container configs, debugging why one container can't reach another, security-auditing containers or finding leaked secrets in images, backing up volumes, slimming images, watching a deploy, inspecting Kafka topics/consumer lag, RabbitMQ queues or Elasticsearch indices, undoing Docker changes, finding the root cause of an outage across services, capturing crashes of short-lived containers, packaging a bug reproduction, mapping which services actually talk to each other, checking missing or misspelled env vars, SBOMs and image diffs, sampling or seeding a database, finding missing indexes, chaos / resilience testing, recording and replaying HTTP traffic, right-sizing memory and CPU limits, or opening a local Docker dashboard.
 ---
 
 # Docker via `aisb`
@@ -85,6 +85,25 @@ Rules: prefer `db query` over `db exec` for anything read-only. Put `LIMIT` in e
 | Babysit a deploy | `system watch --interval 10 --duration 600 --until-change` | Returns on the first change (new failure, stop, recovery). Exit 0 with `changes: []` means it stayed quiet. |
 | Brokers / search | `kafka topics / groups / peek`, `rabbit queues / exchanges / peek`, `es health / indices / search` | `kafka groups`: an idle group with lag is a stalled consumer. `rabbit peek` requeues but marks messages redelivered (mutate tier). |
 
+## Killer features: when the question is bigger than one container
+
+| Need | Command | Notes |
+|---|---|---|
+| **Undo** a risky sequence | `session begin` … work … `session rollback` | Journals an inverse *before* each change: removed containers are recreated (with their secrets), volumes and DBs restored from automatic backups, run states reset, stray objects removed. `rollback` is destroy tier and idempotent; prune/rmi are reported as not undoable. Start one before any multi-step cleanup or migration. |
+| Outage across services | `system incident --since 15m [--format markdown]` | Root cause = the failing container none of whose dependencies failed earlier (observed traffic + env URLs); blast radius, chain, postmortem. `evidence` says whether causality came from traffic, config or timing only. |
+| Crashes you keep missing | `system blackbox --seconds 600`, later `system forensics NAME` | Ring-buffers logs from creation, so even `--rm` containers leave a record (env redacted). |
+| Hand a bug to someone else | `capsule create NAME out.tar.gz [--db-sample 0.05] [--volumes] [--image]`; `capsule load f --env SECRET=...` | Secrets are redacted and must be resupplied; volumes load into fresh volumes. |
+| Who really talks to whom | `net graph [--stack s.json] [--format mermaid]` | From socket tables; `--stack` flags undeclared and unused dependencies. |
+| "Works on my machine" env bugs | `containers envcheck NAME`, `images envcheck IMG --env-file .env` | Missing required vars, typos (`did_you_mean`), unused provided vars. Works on created, not-yet-started containers. |
+| What's in / what changed in an image | `images sbom IMG [--format cyclonedx]`, `images diff A B` | apk/dpkg/rpm/pypi/npm/gem; file and package up/downgrades plus config diff. |
+| Small realistic DB copy | `db sample NAME out.sql.gz --ratio 0.05 [--with-children]` | FK-complete (composite and self references), sequences advanced. Load into a fresh DB with `db exec NEW --file`. |
+| Fake data that passes constraints | `db seed NAME --rows 200 [--seed 1]` | Honors CHECK, enums, uniques, FKs (mutate tier). |
+| Missing indexes, *measured* | `db advise NAME "SELECT ..."`; `db advise NAME` (schema report) | Tries candidates on a disposable clone and reports the real speedup; your DB is untouched. |
+| Resilience testing | `chaos pause/disconnect/latency/kill NAME`, `chaos run stack.json` | Mutate tier, always reverted; `run` returns a report card of who went down with what. **Ask before chaos on anything shared.** |
+| Did my refactor change responses? | `http record NAME --out t.jsonl [--via tcpdump]`, `http replay t.jsonl --to NEW` | Volatile values are masked; replay defaults to GET/HEAD. |
+| Memory/CPU limits | `system rightsize --seconds 120`, then `containers limit NAME --memory 256m --cpus 0.5` | Recommendations from p95/peak plus headroom; `limit` applies live without recreating. Sample under realistic load. |
+| A UI for the human | `aisb portal [--allow mutate]` | Local web dashboard, token-protected, loopback only, never destroy. Tell the user the URL; don't run it unattended. |
+
 MCP: `aisb mcp` serves every op as a tool (`--max-tier read` for a read-only toolset). Destroy tools need `confirm=true`, and the same approval rules apply.
 
 ## Safety rules (non-negotiable)
@@ -124,5 +143,11 @@ For multi-step tasks, read [references/playbooks.md](references/playbooks.md) an
 - Debug connectivity between containers.
 - Security review of a host.
 - Bring up, check and tear down a dev stack.
+- Undoable session for risky work.
+- Multi-service incident root cause.
+- Reproduce a production-like bug locally (capsule, sample, envcheck).
+- Performance: missing indexes and right-sizing.
+- Resilience game day.
+- Verify a refactor with recorded traffic.
 
 End every diagnosis with: **evidence** (quoted fields and log lines), **root-cause hypothesis**, and **proposed fix**, including the exact command. Mark it destroy-tier if it is one.

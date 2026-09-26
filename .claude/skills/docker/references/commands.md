@@ -21,12 +21,14 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | diff | read | `aisb containers diff REF` | Filesystem changes relative to the image. |
 | run | mutate | `aisb containers run IMAGE [-- CMD...] [--name NAME] [--env ENV]... [--port PORT]... [--volume VOLUME]... [--label LABEL]... [--restart RESTART] [--network NETWORK] [--workdir WORKDIR] [--user USER] [--memory MEMORY] [--cpus CPUS] [--entrypoint ENTRYPOINT] [--tty] [--rm] [--health-cmd HEALTH_CMD] [--spec SPEC] [--detach] [--no-pull] [--max-bytes MAX_BYTES] [--dry-run]` | Create and start a container; waits for exit and returns output unless --detach. |
 | secrets | read | `aisb containers secrets REF [--path PATH]... [--max-mb MAX_MB]` | Find exposed credentials: plain secrets in env, secrets in image history, and (with --path) key files |
+| envcheck | read | `aisb containers envcheck REF [--path PATH]...` | Env contract: variables the code reads vs. what the container provides; flags missing ones and typos. |
 | compare | read | `aisb containers compare REF OTHER` | Config drift between two containers: env (secrets masked), ports, mounts, command, image digest, limits. |
 | timeline | read | `aisb containers timeline [-- REFS...] [--since SINCE] [--tail TAIL] [--grep GREP] [--patterns] [--max-bytes MAX_BYTES]` | Merge several containers' logs into one timeline by Docker's timestamps, each line tagged with its source. |
 | debug | mutate | `aisb containers debug REF [-- CMD...] [--image IMAGE] [--max-bytes MAX_BYTES] [--dry-run]` | Run a command in a throwaway sidecar sharing REF's network and PID namespaces (for images with no tools). |
 | start | mutate | `aisb containers start REF [--dry-run]` | Start a stopped container. |
 | stop | mutate | `aisb containers stop REF [--grace GRACE] [--dry-run]` | Stop a running container (SIGTERM, then SIGKILL after --grace). |
 | restart | mutate | `aisb containers restart REF [--grace GRACE] [--dry-run]` | Restart a container. |
+| limit | mutate | `aisb containers limit REF [--memory MEMORY] [--cpus CPUS] [--pids PIDS] [--dry-run]` | Change resource limits of a live container in place (no recreate); swap is capped to the new memory. |
 | exec | mutate | `aisb containers exec REF [-- CMD...] [--workdir WORKDIR] [--user USER] [--env ENV]... [--max-bytes MAX_BYTES] [--dry-run]` | Run a command in a running container; returns exit code and output. |
 | cp | mutate | `aisb containers cp SRC DEST [--dry-run]` | Copy files between a container and the local filesystem (one side must be CONTAINER:PATH). |
 | rm | destroy | `aisb containers rm REF [--force] [--volumes] [--dry-run] [--yes]` | Remove a container. |
@@ -40,6 +42,9 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | history | read | `aisb images history REF` | Layer history of an image. |
 | secrets | read | `aisb images secrets REF` | Credentials baked into an image: ENV/ARG values and build args in layer history, known token formats. |
 | slim | read | `aisb images slim REF` | Where an image's bytes are, and which Dockerfile habits put them there (with the fix for each). |
+| sbom | read | `aisb images sbom REF [--format FORMAT] [--ecosystem ECOSYSTEM]` | Software bill of materials read straight from the image's package databases (no scanner needed). |
+| diff | read | `aisb images diff REF OTHER [--top TOP]` | What changed between two images: files (by content), packages (up/downgrades), and config. |
+| envcheck | read | `aisb images envcheck REF [--env ENV]... [--env-file ENV_FILE] [--path PATH]...` | Preflight an image's env contract before running it: missing required vars and likely typos. |
 | pull | mutate | `aisb images pull REF [--dry-run]` | Pull an image (defaults to :latest). |
 | build | mutate | `aisb images build [PATH] [--tag TAG] [--dockerfile DOCKERFILE] [--build-arg BUILD_ARG]... [--no-cache] [--pull] [--max-bytes MAX_BYTES] [--dry-run]` | Build an image from a local context (classic builder API). |
 | tag | mutate | `aisb images tag REF TARGET [--dry-run]` | Add a tag to an image. |
@@ -79,9 +84,23 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | doctor | read | `aisb system doctor [--managed] [--tail TAIL]` | Fleet triage across every container, worst first: state, config, image, and recent log signatures. |
 | audit | read | `aisb system audit [--managed] [--container CONTAINER]... [--min-severity MIN_SEVERITY]` | Security/config audit of containers: privileges, socket and host mounts, root user, exposed datastores, |
 | watch | read | `aisb system watch [--interval INTERVAL] [--duration DURATION] [--until-change] [--managed] [--tail TAIL]` | Re-run fleet triage and report only what changed: new problems, recoveries, verdict changes, arrivals. |
+| incident | read | `aisb system incident [--since SINCE] [--format FORMAT] [--log-lines LOG_LINES]` | Causal incident report: correlate events, first error signals and observed dependencies into a |
+| blackbox | read | `aisb system blackbox [--seconds SECONDS] [--max-records MAX_RECORDS] [--log-lines LOG_LINES]` | Flight recorder: keeps a ring buffer of every container's logs from the moment it is *created*, and |
+| forensics | read | `aisb system forensics [NAME] [--limit LIMIT]` | Read blackbox records; with a name, run doctor on the last captured state of a container that's gone. |
+| rightsize | read | `aisb system rightsize [--seconds SECONDS] [--interval INTERVAL] [--headroom HEADROOM] [--container CONTAINER]...` | Sample live usage and recommend memory/CPU/pids limits per container, flagging at-risk, |
 | snapshot | read | `aisb system snapshot` | Inventory of containers, images, volumes and networks; save it and diff later with `system changes`. |
 | changes | read | `aisb system changes BEFORE [AFTER]` | What was added, removed, recreated or changed between two snapshots, with dry-run cleanup commands. |
 | prune | destroy | `aisb system prune [--no-containers] [--no-images] [--no-networks] [--volumes] [--all-images] [--managed] [--dry-run] [--yes]` | Remove unused objects. Volumes are opt-in. |
+
+## session
+
+| op | tier | usage | summary |
+|---|---|---|---|
+| begin | read | `aisb session begin [--name NAME] [--protect-data]` | Start an undoable session: baseline snapshot now; every destructive change after this is journaled with |
+| status | read | `aisb session status [--session SESSION]` | What changed since the session began, and which changes can be undone. |
+| list | read | `aisb session list` | Sessions on this machine, newest first. |
+| end | read | `aisb session end` | Stop journaling (artifacts are kept until you delete $AISB_HOME/sessions/ID). |
+| rollback | destroy | `aisb session rollback [--session SESSION] [--dry-run] [--yes]` | Return to the session baseline: remove what was added, then replay journaled inverses newest-first |
 
 ## stack
 
@@ -95,6 +114,7 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 
 | op | tier | usage | summary |
 |---|---|---|---|
+| graph | read | `aisb net graph [--samples SAMPLES] [--interval INTERVAL] [--stack STACK] [--format FORMAT]` | Live service map from established TCP connections: who calls whom (and egress), no instrumentation. |
 | map | read | `aisb net map` | Networks with their containers, IPs and DNS aliases; flags the default bridge (no DNS by name). |
 | probe | read | `aisb net probe SRC DST [--port PORT]` | Layer-by-layer check of src -> dst: shared network, dst listening (and on which address), DNS, TCP. |
 
@@ -121,6 +141,9 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | restore | destroy | `aisb db restore REF FILE [--database DATABASE] [--no-single-transaction] [--engine ENGINE] [--dry-run] [--yes]` | Run a SQL dump into the database. Overwrites data, so it needs confirmation. |
 | diff | read | `aisb db diff REF [OTHER] [--database DATABASE] [--other-database OTHER_DATABASE] [--counts] [--engine ENGINE] [--path PATH] [--other-path OTHER_PATH]` | Schema drift between two databases (tables, columns, indexes), optionally row counts too. |
 | clone | mutate | `aisb db clone REF NAME [--database DATABASE] [--port PORT] [--within WITHIN] [--dry-run]` | Disposable copy of a database container with its data: rehearse migrations or risky writes, then drop it. |
+| sample | read | `aisb db sample REF OUT [--ratio RATIO] [--root ROOT]... [--max-rows MAX_ROWS] [--with-children] [--data-only] [--database DATABASE] [--engine ENGINE] [--path PATH]` | Referentially complete subset: sample root tables, pull in every parent row their FKs need (to a |
+| seed | mutate | `aisb db seed REF [--rows ROWS] [--table TABLE]... [--seed SEED] [--database DATABASE] [--engine ENGINE] [--dry-run]` | Insert synthetic rows that satisfy the schema: types, lengths, precision, enums, simple CHECKs, |
+| advise | mutate | `aisb db advise REF [SQL] [--runs RUNS] [--database DATABASE] [--keep-clone] [--dry-run]` | Postgres index advisor that proves itself: on a disposable clone, EXPLAIN ANALYZE the query, derive index |
 | activity | read | `aisb db activity REF` | What the database is doing now: running queries (longest first), blockers, connections, cache hit ratio. |
 | kill | mutate | `aisb db kill REF PID [--terminate] [--dry-run]` | Cancel a running query (or terminate its connection). |
 
@@ -171,6 +194,8 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 |---|---|---|---|
 | get | read | `aisb http get REF [PATH] [--port PORT] [--header HEADER]... [--https] [--insecure] [--head] [--max-bytes MAX_BYTES] [--seconds SECONDS]` | GET a container endpoint: status, timing, key headers, body (parsed when JSON). Exit 4 on HTTP errors. |
 | send | mutate | `aisb http send REF [PATH] [--method METHOD] [--data DATA] [--json-data JSON_DATA] [--header HEADER]... [--port PORT] [--https] [--insecure] [--max-bytes MAX_BYTES] [--seconds SECONDS] [--dry-run]` | Send a non-GET request to a container endpoint (state-changing, so mutate tier). |
+| record | read | `aisb http record REF [--out OUT] [--seconds SECONDS] [--via VIA] [--listen LISTEN] [--port PORT] [--max-body MAX_BODY] [--image IMAGE]` | Record real HTTP exchanges with a container: through a recording reverse proxy, or passively with a |
+| replay | mutate | `aisb http replay FILE [--to TO] [--port PORT] [--all-methods] [--ignore IGNORE]... [--limit LIMIT] [--dry-run]` | Replay recorded traffic against another container (e.g. the new version) and compare status codes, |
 
 ## fs
 
@@ -180,3 +205,20 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | ls | read | `aisb fs ls REF [PATH] [--limit LIMIT] [--max-mb MAX_MB]` | List a directory (one level) with type, size, mode, mtime and link targets. |
 | find | read | `aisb fs find REF [PATH] [--name NAME] [--type TYPE] [--min-size MIN_SIZE] [--limit LIMIT] [--max-mb MAX_MB]` | Recursive search by name glob, type and size, like `find`, without needing find in the image. |
 | cat | read | `aisb fs cat REF PATH [--max-bytes MAX_BYTES] [--tail]` | Print a file (text), or its size and sha256 when it is binary. |
+
+## capsule
+
+| op | tier | usage | summary |
+|---|---|---|---|
+| create | read | `aisb capsule create REF OUT [--volumes] [--db-sample DB_SAMPLE] [--image] [--log-lines LOG_LINES]` | Bundle a container's config (secrets redacted), logs, doctor report, DB schema (+sample) and optionally |
+| load | mutate | `aisb capsule load FILE [--name NAME] [--env ENV]... [--keep-ports] [--dry-run]` | Recreate a capsule: image (embedded, by digest, or by ref), config, volume contents (into *fresh* volumes), |
+
+## chaos
+
+| op | tier | usage | summary |
+|---|---|---|---|
+| pause | mutate | `aisb chaos pause REF [--seconds SECONDS] [--dry-run]` | Freeze every process in the container (SIGSTOP-like), then unpause. |
+| disconnect | mutate | `aisb chaos disconnect REF [--network NETWORK] [--seconds SECONDS] [--dry-run]` | Partition: detach the container from its network(s), then reconnect with the original DNS aliases. |
+| latency | mutate | `aisb chaos latency REF [--ms MS] [--jitter JITTER] [--loss LOSS] [--seconds SECONDS] [--image IMAGE] [--dry-run]` | Degrade the network (delay/jitter/loss) with tc netem from a NET_ADMIN sidecar in the target's namespace. |
+| kill | mutate | `aisb chaos kill REF [--signal SIGNAL] [--dry-run]` | Kill the main process (no revert: this tests the restart policy and dependents' resilience). |
+| run | mutate | `aisb chaos run STACK [--faults FAULTS]... [--service SERVICE]... [--seconds SECONDS] [--recover-within RECOVER_WITHIN] [--dry-run]` | Game day: for each service x fault, inject, watch every other service's health (blast radius) and the |

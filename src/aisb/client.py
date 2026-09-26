@@ -1,7 +1,7 @@
 from types import TracebackType
 
-from .api import (Containers, Db, Fs, Http, Images, KafkaOps, MongoOps, Net, Networks, RabbitOps, RedisOps, SearchOps,
-                  StackOps, Svc, System, Volumes)
+from .api import (Capsule, Chaos, Containers, Db, Fs, Http, Images, KafkaOps, MongoOps, Net, Networks, RabbitOps, RedisOps, SearchOps,
+                  Session, StackOps, Svc, System, Volumes)
 from .ops import Resource
 from .transport import Transport, resolve_endpoint
 
@@ -16,6 +16,7 @@ class Docker:
         self.svc, self.db, self.redis, self.mongo = Svc(t), Db(t), RedisOps(t), MongoOps(t)
         self.kafka, self.rabbit, self.es = KafkaOps(t), RabbitOps(t), SearchOps(t)
         self.http, self.fs = Http(t), Fs(t)
+        self.session, self.capsule, self.chaos = Session(t), Capsule(t), Chaos(t)
 
     def resource(self, name: str) -> Resource:
         res = getattr(self, name, None)

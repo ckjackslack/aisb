@@ -143,6 +143,7 @@ class RunSpec:
     aliases: tuple[str, ...] = ()   # DNS names on `network`
     pid: str | None = None          # e.g. "container:web" to share a process namespace
     hostname: str | None = None
+    cap_add: tuple[str, ...] = ()   # e.g. ("NET_ADMIN",) for tc in a sidecar
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Self:
@@ -154,7 +155,7 @@ class RunSpec:
             norm["env"] = [f"{k}={v}" for k, v in norm["env"].items()]
         if isinstance(norm.get("cmd"), str):
             norm["cmd"] = shlex.split(norm["cmd"])
-        for key in ("cmd", "env", "ports", "volumes", "aliases"):
+        for key in ("cmd", "env", "ports", "volumes", "aliases", "cap_add"):
             if key in norm:
                 norm[key] = tuple(norm[key])
         if "labels" in norm:
@@ -191,6 +192,7 @@ class RunSpec:
             "NanoCpus": int(self.cpus * 1e9) if self.cpus else None,
             "AutoRemove": auto_remove or None,
             "PidMode": self.pid,
+            "CapAdd": list(self.cap_add) or None,
         })
         endpoint = {self.network: {"Aliases": list(self.aliases)}} if self.network and self.aliases else None
         return compact({

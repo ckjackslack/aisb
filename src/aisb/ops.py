@@ -196,11 +196,18 @@ class Outcome:
         return {"status": self.status, "planned": self.planned, **({"warnings": self.warnings} if self.warnings else {})}
 
 
+Hook = Callable[["HasResources", Op, Mapping[str, Any]], None]
+HOOKS: list[Hook] = []
+
+
 def invoke(client: HasResources, op_: Op, kwargs: Mapping[str, Any], *,
            dry_run: bool = False, confirm: bool = False) -> Outcome:
     """Run an op under its tier policy: DESTROY without confirm degrades to a preview."""
     preview = op_.tier is not Tier.READ and (dry_run or (op_.tier is Tier.DESTROY and not confirm))
     if not preview:
+        if op_.tier is not Tier.READ:
+            for hook in HOOKS:  # e.g. session capture: record how to undo before the change happens
+                hook(client, op_, kwargs)
         return Outcome("ok", op_.call(client, kwargs))
     with client.transport.dry_run() as planned:
         result = op_.call(client, kwargs)

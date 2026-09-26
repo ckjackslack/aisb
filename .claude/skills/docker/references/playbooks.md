@@ -134,3 +134,45 @@ Stop *looking for causes* at the first step that explains the problem. Still gat
 3. `A stack ps stack.json` shows state, ports and `drift` (the file changed since the container was created). To apply drift: `A stack down stack.json --service NAME --dry-run`, ask, then `stack up` again.
 4. `A net probe STACK-app db --port 5432` if a service can't reach another.
 5. `A stack down NAME` (destroy tier). Volumes stay unless `--volumes` is passed, which needs explicit approval.
+
+## Undoable session for risky work
+
+1. `aisb session begin --name cleanup` (add `--protect-data` if you will run `db exec` writes).
+2. Do the work as usual. Destroy ops still need the user's approval and `--yes`.
+3. `aisb session status` lists each journaled change and whether it can be undone.
+4. Keep it: `aisb session end`. Revert it: `aisb session rollback --dry-run`, show the plan, and after approval run `aisb session rollback --yes`.
+5. Report `failed` and `not_undoable` from the rollback result explicitly.
+
+## Multi-service incident root cause
+
+1. `aisb system incident --since 30m`. Read `root_cause`, `chain`, `blast_radius` and `evidence`.
+2. With `evidence: temporal` only timing supports the chain. Say so, and run `aisb net graph` while the stack is healthy to get real dependencies.
+3. `aisb containers doctor ROOT` for the root's likely cause; `aisb system forensics ROOT` if it is already gone.
+4. Hand over `aisb system incident --since 30m --format markdown` as the postmortem draft.
+
+## Reproduce a production-like bug locally
+
+1. On the machine with the bug: `aisb capsule create NAME bug.tar.gz --db-sample 0.02`. Add `--volumes` only if the data is needed and allowed to leave.
+2. Elsewhere: `aisb capsule load bug.tar.gz --env SECRET=...` for each `missing_secrets` entry.
+3. Before starting a new container: create it, then `aisb containers envcheck NAME` to catch missing or misspelled variables.
+4. `aisb images diff GOOD_IMAGE BAD_IMAGE` when a new image is the suspect.
+
+## Performance: missing indexes and right-sizing
+
+1. `aisb db activity NAME` to find the slow statement, then `aisb db advise NAME "SELECT ..."`.
+2. Report only `winners` (measured on a clone) with their `ddl`. Applying them is a `db exec`, so clone-rehearse first on big tables.
+3. `aisb db advise NAME` with no SQL gives the unindexed-FK and unused-index report.
+4. Limits: `aisb system rightsize --seconds 300` under representative load, then `containers limit` for `at-risk` and `unlimited` containers after the user agrees.
+
+## Resilience game day
+
+1. Only on a dev stack the user owns. Confirm first.
+2. `aisb chaos run stack.json --seconds 10`. Each fault is injected, observed and reverted.
+3. Present `findings`: which services went down with which dependency, and failures their own health checks missed.
+4. Suggest fixes (timeouts, retries, health checks), then re-run to show the score change.
+
+## Verify a refactor with recorded traffic
+
+1. Point clients at `aisb http record OLD --out t.jsonl --listen 18099 --seconds 120`, or capture passively with `--via tcpdump`.
+2. Start the new version as another container, then `aisb http replay t.jsonl --to NEW` (add `--ignore 'meta.*'` for known-volatile fields).
+3. Report `match_rate`, each mismatch's path with old and new values, and the latency ratio.

@@ -1,9 +1,11 @@
 """Container networking: who can reach whom, and exactly where a connection breaks."""
 
 import ipaddress
-from typing import Annotated, Any
+import time
+from typing import Annotated, Any, Literal
 
 from ..errors import NotFound
+from ..insights import graph
 from ..ops import Resource, Tier, op
 from ..services import Target
 from ..util import q
@@ -24,25 +26,55 @@ else echo "NOTOOL"; fi'''
 
 
 def parse_listeners(text: str) -> list[tuple[str, int]]:
-    """/proc/net/tcp{,6} -> [(ip, port)] of sockets in LISTEN (state 0A)."""
-    out = []
-    for line in text.splitlines()[1:]:
-        parts = line.split()
-        if len(parts) < 4 or parts[3] != "0A" or ":" not in parts[1]:
-            continue
-        hexip, hexport = parts[1].rsplit(":", 1)
-        raw = bytes.fromhex(hexip)
-        if len(raw) == 4:
-            ip = str(ipaddress.IPv4Address(raw[::-1]))
-        elif len(raw) == 16:  # four little-endian 32-bit words
-            ip = str(ipaddress.IPv6Address(b"".join(raw[i:i + 4][::-1] for i in range(0, 16, 4))))
-        else:
-            continue
-        out.append((ip, int(hexport, 16)))
-    return sorted(set(out))
+    """/proc/net/tcp{,6} -> [(ip, port)] of sockets in LISTEN."""
+    return graph.listeners(graph.parse_sockets(text))
 
 
 class Net(Resource, name="net"):
+    def observe(self, *, samples: int = 1, interval: float = 1.0,
+                containers: list[str] | None = None) -> dict[str, graph.Node]:
+        """Socket tables of running containers (union over samples), keyed by container name."""
+        ctr = Containers(self.t)
+        nodes: dict[str, graph.Node] = {}
+        rows = self.t.json("GET", "/containers/json") or []
+        for r in rows:
+            name = (r.get("Names") or ["?"])[0].lstrip("/")
+            if containers and name not in containers:
+                continue
+            ips = {n.get("IPAddress") for n in ((r.get("NetworkSettings") or {}).get("Networks") or {}).values()}
+            nodes[name] = graph.Node(name, {ip for ip in ips if ip})
+        for i in range(max(1, samples)):
+            if i:
+                time.sleep(interval)
+            for n in nodes.values():
+                if not n.observed:
+                    continue
+                res = ctr.run_in(n.name, ["cat", "/proc/net/tcp", "/proc/net/tcp6"])
+                if "local_address" not in res.stdout:
+                    n.observed = False  # no `cat` in the image (distroless): its outbound edges can't be seen
+                    continue
+                n.socks += graph.parse_sockets(res.stdout)
+        return nodes
+
+    @op(Tier.READ, name="graph")
+    def graph_(self, *, samples: Annotated[int, "snapshots to union (short-lived connections)"] = 3,
+               interval: Annotated[float, "seconds between snapshots"] = 1.0,
+               stack: Annotated[str | None, "stack file: compare declared depends_on with observed traffic"] = None,
+               format: Annotated[Literal["json", "mermaid"], "output format"] = "json") -> Any:
+        """Live service map from established TCP connections: who calls whom (and egress), no instrumentation."""
+        g = graph.build(self.observe(samples=samples, interval=interval))
+        if stack:
+            from .. import stack as stk
+            s = stk.load(stack)
+            name_of = {svc.container: svc.name for svc in s.services.values()}
+            seen = {(name_of.get(e["from"]), name_of.get(e["to"])) for e in g["edges"]}
+            declared = {(svc.name, d) for svc in s.services.values() for d in svc.depends_on}
+            g["undeclared_dependencies"] = sorted(f"{a} -> {b}" for a, b in seen - declared if a and b)
+            g["unused_declared"] = sorted(f"{a} -> {b}" for a, b in declared - seen)
+        if format == "mermaid":
+            return {"output": graph.mermaid(g), "edges": len(g["edges"])}
+        return g
+
     @op(Tier.READ, name="map")
     def map_(self) -> dict[str, Any]:
         """Networks with their containers, IPs and DNS aliases; flags the default bridge (no DNS by name)."""

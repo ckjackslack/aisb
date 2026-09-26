@@ -81,8 +81,11 @@ class Adapter:
         repo = t.image.split("@")[0].rsplit("/", 1)[-1].split(":")[0]  # 'docker.io/bitnami/redis:7' -> 'redis'
         if cls.image_rx.search(repo):
             return 3, f"image {t.image}"
-        if hint := next((k for k in t.env if k.startswith(cls.env_hints)), None) if cls.env_hints else None:
-            return 2, f"env {hint}"
+        # Env alone is ambiguous (clients carry REDIS_URL, POSTGRES_PASSWORD...): count it only for servers,
+        # i.e. images that also expose the service's port.
+        hint = next((k for k in t.env if k.startswith(cls.env_hints)), None) if cls.env_hints else None
+        if hint and any(p in t.exposed for p in cls.ports):
+            return 2, f"env {hint} + port"
         if port := next((p for p in cls.ports if p in t.exposed), None):
             return 1, f"port {port}"
         return 0, ""

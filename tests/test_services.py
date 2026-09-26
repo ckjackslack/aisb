@@ -38,7 +38,8 @@ def cli(host, capsys):
 @pytest.mark.parametrize(("image", "env", "exposed", "kind", "why"), [
     ("postgres:16-alpine", (), (), "postgres", "image"),
     ("docker.io/bitnami/redis:7.2", (), (), "redis", "image"),
-    ("ghcr.io/acme/db:1", ("POSTGRES_PASSWORD=x",), (), "postgres", "env"),
+    ("ghcr.io/acme/db:1", ("POSTGRES_PASSWORD=x",), (5432,), "postgres", "env"),
+    ("acme/api:1", ("REDIS_URL=redis://cache:6379", "POSTGRES_PASSWORD=x"), (8080,), None, None),  # a client
     ("mariadb:11", (), (), "mysql", "image"),
     ("valkey/valkey:8", (), (), "redis", "image"),
     ("acme/custom:1", (), (27017,), "mongo", "port"),

@@ -92,7 +92,33 @@ aisb system rightsize --seconds 120; aisb containers limit api --memory 256m --c
 aisb portal [--allow mutate]                           # local, token-protected web dashboard
 ```
 
-## Fleet: `aisb bundle` + pyinfra
+## Fleet: many machines, one CLI
+
+`aisb fleet` works one level up, on an inventory of machines grouped and labelled, which you monitor and act on one host or many at a time.
+It stays stdlib-only. Transport is your OpenSSH client (`~/.ssh/config`, agent, ProxyJump all apply), and each remote Docker socket is
+forwarded to a private local socket, so **remote machines need only sshd and Docker**: no Python, no agent, no docker CLI.
+Design: [docs/design/fleet.md](docs/design/fleet.md).
+
+```bash
+aisb fleet add web1 --ssh deploy@10.0.0.5 --group web --group prod --label region=eu
+aisb fleet add db1 --ssh db1.internal --port 2222 --key ~/.ssh/ops --group db --group prod
+aisb fleet ping all                                     # SSH + Docker round trip, versions
+aisb fleet status @prod                                 # worst first: vitals (load, mem, disk) + container verdicts, with reasons
+aisb fleet watch all --interval 30 --until-change       # monitor: host down/recovered, verdict changes, new reasons
+aisb fleet ps 'region=eu' ; aisb fleet doctor @prod     # containers / problems across hosts, one table
+aisb fleet query @web -- containers logs api --tail 50  # ANY read op on each host
+aisb fleet apply @web --batch 1 --fail-fast -- containers restart api   # rolling; --dry-run = per-host plan
+aisb fleet destroy '@web,!web1' -- containers rm old    # exit 3 with each host's plan until --yes
+aisb fleet ship app:2 @prod                             # copy an image over SSH, no registry; skips hosts that have it
+aisb fleet shell @db -- 'df -h /var/lib/docker'         # on the machines themselves
+aisb fleet group canary --add '@web,&region=eu'         # bulk membership by selector
+aisb fleet export --format pyinfra > inventory.py       # the same groups for pyinfra deploys (or ssh-config)
+```
+
+Selectors: `all`, `name`, `web*`, `@group`, `label=value`, joined with `,` (union), `&` (intersect), `!` (exclude).
+Fleet ops keep the inner op's safety tier, and the MCP server exposes them like every other op.
+
+## Fleet deploys: `aisb bundle` + pyinfra
 
 Being stdlib-only, aisb ships as **one deterministic `.pyz`** (~160 KB) that runs on any host with Python >= 3.11:
 no pip, no venv, no docker CLI. `aisb bundle aisb.pyz`, copy it anywhere, `python3 aisb.pyz system doctor`.
@@ -138,6 +164,7 @@ services/      adapters for software inside containers: postgres, mysql/mariadb,
 rootfs.py      streaming walks over a container's filesystem via the archive API
 state.py       $AISB_HOME (0700): sessions, blackbox records
 bundle.py      deterministic single-file .pyz of aisb (stdlib zipfile)
+fleet/         inventory + selectors, OpenSSH transport (exec, socket tunnels), vitals/health, fan-out
 contrib/       optional third-party integrations (pyinfra facts, operations, @aisb connector)
 portal.py      stdlib web UI over the registry (token, Host allowlist, no destroy)
 stack.py       stack files: validation, naming, dependency order (graphlib), config hashes

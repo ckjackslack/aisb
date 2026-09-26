@@ -21,7 +21,7 @@ from .ops import EMPTY, Op, Tier, invoke, jsonable, registry
 # Ops that touch host files or run for a long time are not offered through a browser; neither are
 # host-path arguments (the UI must never become a way to read or write the host filesystem).
 HOST_EFFECTS = frozenset({"system.blackbox", "system.events", "http.record", "containers.cp", "images.build"})
-HOST_PARAMS = frozenset({"out", "file", "spec", "env_file"})
+HOST_PARAMS = frozenset({"out", "file", "spec", "env_file", "inventory"})
 CACHE_S = 3.0
 
 

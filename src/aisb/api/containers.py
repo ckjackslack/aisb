@@ -139,6 +139,8 @@ def runspec_of(d: dict[str, Any]) -> dict[str, Any]:
         "tty": bool(cfg.get("Tty")),
         "rm": bool(host.get("AutoRemove")),
         "health_cmd": health[1] if len(health) == 2 and health[0] == "CMD-SHELL" else None,
+        "cap_add": host.get("CapAdd") or [],
+        "privileged": bool(host.get("Privileged")),
     }
     return {k: v for k, v in spec.items() if v not in (None, [], {}, False)}
 
@@ -345,6 +347,7 @@ class Containers(Resource, name="containers"):
             entrypoint: str | None = None, tty: bool = False,
             rm: Annotated[bool, "remove the container after it exits"] = False,
             health_cmd: Annotated[str | None, "shell healthcheck command"] = None,
+            privileged: Annotated[bool, "full host access (Docker-in-Docker, device work); avoid otherwise"] = False,
             spec: Annotated[str | None, "RunSpec JSON file; flags override it"] = None,
             detach: Annotated[bool, "start and return instead of waiting for exit"] = False,
             pull: Annotated[bool, "pull the image if it is missing"] = True,
@@ -354,7 +357,7 @@ class Containers(Resource, name="containers"):
         s = base.merge(cmd=tuple(cmd), name=name, env=tuple(env or ()), ports=tuple(port or ()),
                        volumes=tuple(volume or ()), labels=label, restart=restart, network=network,
                        workdir=workdir, user=user, memory=memory, cpus=cpus, entrypoint=entrypoint,
-                       tty=tty, rm=rm, health_cmd=health_cmd)
+                       tty=tty, rm=rm, health_cmd=health_cmd, privileged=privileged)
         warn = {"warnings": w} if self.t.planning and (w := self.preflight(s, pull=pull)) else {}
         cid = self.create_from(s, pull=pull, auto_remove=s.rm and detach)
         self.t.json("POST", f"/containers/{cid}/start")

@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import EllipsisType
-from typing import Any
+from typing import Any, BinaryIO
 from urllib.parse import urlencode, urlsplit
 
 from .errors import DockerUnavailable, error_for
@@ -102,7 +102,7 @@ class Request:
     path: str
     query: Mapping[str, Any] = field(default_factory=dict)
     body: Any = None
-    data: bytes | None = None
+    data: bytes | BinaryIO | None = None  # a file object is streamed (chunked), never read into memory
     content_type: str | None = None
 
     @property
@@ -110,7 +110,7 @@ class Request:
         qs = urlencode({k: _query_value(v) for k, v in self.query.items() if v is not None})
         return f"{self.path}?{qs}" if qs else self.path
 
-    def payload(self) -> tuple[bytes | None, dict[str, str]]:
+    def payload(self) -> tuple[bytes | BinaryIO | None, dict[str, str]]:
         if self.body is not None:
             return json.dumps(self.body).encode(), {"Content-Type": "application/json"}
         if self.data is not None:
@@ -127,7 +127,8 @@ class Request:
                 body = {**body, "Env": redact_env(body["Env"])}
             out["body"] = body
         elif self.data is not None:
-            out["body"] = f"<{len(self.data)} bytes {self.content_type}>"
+            size = f"{len(self.data)} bytes" if isinstance(self.data, (bytes, bytearray)) else "streamed"
+            out["body"] = f"<{size} {self.content_type}>"
         return out
 
 

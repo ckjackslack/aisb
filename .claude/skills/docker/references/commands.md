@@ -19,7 +19,7 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | top | read | `aisb containers top REF` | Processes running inside the container. |
 | stats | read | `aisb containers stats REF` | One-shot resource usage: CPU %, memory, network, block IO, pids. |
 | diff | read | `aisb containers diff REF` | Filesystem changes relative to the image. |
-| run | mutate | `aisb containers run IMAGE [-- CMD...] [--name NAME] [--env ENV]... [--port PORT]... [--volume VOLUME]... [--label LABEL]... [--restart RESTART] [--network NETWORK] [--workdir WORKDIR] [--user USER] [--memory MEMORY] [--cpus CPUS] [--entrypoint ENTRYPOINT] [--tty] [--rm] [--health-cmd HEALTH_CMD] [--spec SPEC] [--detach] [--no-pull] [--max-bytes MAX_BYTES] [--dry-run]` | Create and start a container; waits for exit and returns output unless --detach. |
+| run | mutate | `aisb containers run IMAGE [-- CMD...] [--name NAME] [--env ENV]... [--port PORT]... [--volume VOLUME]... [--label LABEL]... [--restart RESTART] [--network NETWORK] [--workdir WORKDIR] [--user USER] [--memory MEMORY] [--cpus CPUS] [--entrypoint ENTRYPOINT] [--tty] [--rm] [--health-cmd HEALTH_CMD] [--privileged] [--spec SPEC] [--detach] [--no-pull] [--max-bytes MAX_BYTES] [--dry-run]` | Create and start a container; waits for exit and returns output unless --detach. |
 | secrets | read | `aisb containers secrets REF [--path PATH]... [--max-mb MAX_MB]` | Find exposed credentials: plain secrets in env, secrets in image history, and (with --path) key files |
 | envcheck | read | `aisb containers envcheck REF [--path PATH]...` | Env contract: variables the code reads vs. what the container provides; flags missing ones and typos. |
 | compare | read | `aisb containers compare REF OTHER` | Config drift between two containers: env (secrets masked), ports, mounts, command, image digest, limits. |
@@ -222,3 +222,24 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | latency | mutate | `aisb chaos latency REF [--ms MS] [--jitter JITTER] [--loss LOSS] [--seconds SECONDS] [--image IMAGE] [--dry-run]` | Degrade the network (delay/jitter/loss) with tc netem from a NET_ADMIN sidecar in the target's namespace. |
 | kill | mutate | `aisb chaos kill REF [--signal SIGNAL] [--dry-run]` | Kill the main process (no revert: this tests the restart policy and dependents' resilience). |
 | run | mutate | `aisb chaos run STACK [--faults FAULTS]... [--service SERVICE]... [--seconds SECONDS] [--recover-within RECOVER_WITHIN] [--dry-run]` | Game day: for each service x fault, inject, watch every other service's health (blast radius) and the |
+
+## fleet
+
+| op | tier | usage | summary |
+|---|---|---|---|
+| hosts | read | `aisb fleet hosts [TARGET] [--inventory INVENTORY]` | Hosts of the inventory (or of a selection) with transport, groups and labels. |
+| groups | read | `aisb fleet groups [--inventory INVENTORY]` | Every group with its members; computed groups show the selectors they're defined by. |
+| add | mutate | `aisb fleet add NAME [--ssh SSH] [--port PORT] [--key KEY] [--docker DOCKER] [--group GROUP]... [--label LABEL]... [--ssh-option SSH_OPTION]... [--replace] [--inventory INVENTORY] [--dry-run]` | Add or update a machine. Nothing is contacted; run `fleet ping NAME` next. |
+| remove | mutate | `aisb fleet remove NAME [--inventory INVENTORY] [--dry-run]` | Remove a machine from the inventory (the machine itself is not touched). |
+| group | mutate | `aisb fleet group NAME [--add ADD] [--remove REMOVE] [--inventory INVENTORY] [--dry-run]` | Change group membership in bulk: `fleet group canary --add 'web*,&region=eu'`. |
+| export | read | `aisb fleet export [TARGET] [--format FORMAT] [--inventory INVENTORY]` | The inventory for other tools: a pyinfra inventory.py (groups kept), an ssh_config, or JSON. |
+| ping | read | `aisb fleet ping [TARGET] [--parallel PARALLEL] [--inventory INVENTORY]` | Can each host be reached (SSH, then Docker)? Round-trip time and Docker version per host. |
+| status | read | `aisb fleet status [TARGET] [--no-doctor] [--tail TAIL] [--parallel PARALLEL] [--inventory INVENTORY]` | Which machines need attention and why: vitals (load, memory, disk) + container verdicts, worst first. |
+| watch | read | `aisb fleet watch [TARGET] [--interval INTERVAL] [--duration DURATION] [--until-change] [--tail TAIL] [--parallel PARALLEL] [--inventory INVENTORY]` | Monitor: re-run status and report only changes: hosts going down/recovering, verdicts, new reasons. |
+| ps | read | `aisb fleet ps [TARGET] [--all] [--name NAME] [--parallel PARALLEL] [--inventory INVENTORY]` | Containers across machines in one table (host column). |
+| doctor | read | `aisb fleet doctor [TARGET] [--tail TAIL] [--parallel PARALLEL] [--inventory INVENTORY]` | Container problems across machines, worst first, with the host each one is on. |
+| ship | mutate | `aisb fleet ship IMAGE TARGET [--parallel PARALLEL] [--batch BATCH] [--fail-fast] [--inventory INVENTORY] [--dry-run]` | Copy an image from this machine to the selected hosts (no registry needed; air-gapped friendly). |
+| query | read | `aisb fleet query TARGET [-- COMMAND...] [--parallel PARALLEL] [--batch BATCH] [--fail-fast] [--flat] [--inventory INVENTORY]` | Run a read op on every selected host: `fleet query @prod -- containers logs api --tail 50`. |
+| apply | mutate | `aisb fleet apply TARGET [-- COMMAND...] [--parallel PARALLEL] [--batch BATCH] [--fail-fast] [--inventory INVENTORY] [--dry-run]` | Run a mutate op on every selected host; `--dry-run` returns each host's planned API calls. |
+| destroy | destroy | `aisb fleet destroy TARGET [-- COMMAND...] [--parallel PARALLEL] [--batch BATCH] [--fail-fast] [--inventory INVENTORY] [--dry-run] [--yes]` | Run a destroy op on every selected host. Without --yes: each host's plan, exit 3, nothing changed. |
+| shell | mutate | `aisb fleet shell TARGET [-- CMD...] [--sudo] [--seconds SECONDS] [--parallel PARALLEL] [--batch BATCH] [--fail-fast] [--max-bytes MAX_BYTES] [--inventory INVENTORY] [--dry-run]` | Run a command on the machines themselves over SSH (not in containers): `fleet shell @db -- df -h /var`. |

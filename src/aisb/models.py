@@ -144,6 +144,7 @@ class RunSpec:
     pid: str | None = None          # e.g. "container:web" to share a process namespace
     hostname: str | None = None
     cap_add: tuple[str, ...] = ()   # e.g. ("NET_ADMIN",) for tc in a sidecar
+    privileged: bool = False        # full host access (e.g. Docker-in-Docker); `system audit` flags it
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Self:
@@ -193,6 +194,7 @@ class RunSpec:
             "AutoRemove": auto_remove or None,
             "PidMode": self.pid,
             "CapAdd": list(self.cap_add) or None,
+            "Privileged": self.privileged or None,
         })
         endpoint = {self.network: {"Aliases": list(self.aliases)}} if self.network and self.aliases else None
         return compact({

@@ -112,8 +112,15 @@ class _Handler(BaseHTTPRequestHandler):
     def _dispatch(self) -> None:
         fake: FakeDaemon = self.server.fake  # type: ignore[attr-defined]
         url = urlsplit(self.path)
-        length = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(length) if length else b""
+        if "chunked" in self.headers.get("Transfer-Encoding", ""):  # streamed uploads (e.g. image load)
+            raw = b""
+            while size := int(self.rfile.readline().split(b";")[0].strip() or b"0", 16):
+                raw += self.rfile.read(size)
+                self.rfile.readline()
+            self.rfile.readline()
+        else:
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if length else b""
         if url.path == "/_ping":
             return self._send(Reply(body=b"OK", content_type="text/plain", headers={"Api-Version": API}))
         body: Any = raw
@@ -126,7 +133,13 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send(reply(seen) if callable(reply) else reply)
         self._send(Reply(404, json={"message": f"no route for {self.command} {seen.path}"}))
 
-    do_GET = do_POST = do_PUT = do_DELETE = do_HEAD = _dispatch
+    def _handle(self) -> None:
+        try:
+            self._dispatch()
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the client hung up early (it stopped reading a stream): legitimate, not a test failure
+
+    do_GET = do_POST = do_PUT = do_DELETE = do_HEAD = _handle
 
     def _send(self, r: Reply) -> None:
         self.send_response(r.status)

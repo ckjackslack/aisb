@@ -176,3 +176,14 @@ Stop *looking for causes* at the first step that explains the problem. Still gat
 1. Point clients at `aisb http record OLD --out t.jsonl --listen 18099 --seconds 120`, or capture passively with `--via tcpdump`.
 2. Start the new version as another container, then `aisb http replay t.jsonl --to NEW` (add `--ignore 'meta.*'` for known-volatile fields).
 3. Report `match_rate`, each mismatch's path with old and new values, and the latency ratio.
+
+## Fleet triage and rolling changes
+
+1. `aisb fleet status all`. Work down from `down` and `failing` hosts; quote each host's `reasons`.
+2. For container problems: `aisb fleet doctor TARGET`, then `aisb fleet query HOST -- containers doctor NAME`.
+3. For machine problems (disk, memory, load): `aisb fleet shell HOST -- 'df -h; free -m'`, then `aisb fleet query HOST -- system df` before proposing `system prune`.
+4. Rolling change after approval:
+   - `aisb fleet apply TARGET --dry-run -- ...` and show the per-host plan;
+   - then `aisb fleet apply TARGET --batch 1 --fail-fast -- ...`;
+   - then `aisb fleet status TARGET`.
+5. Finish with `aisb fleet watch TARGET --interval 30 --duration 600 --until-change`, and report any events.

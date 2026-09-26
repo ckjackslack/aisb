@@ -68,8 +68,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _table(rows: list[dict[str, Any]]) -> str:
-    cols = [k for k, v in rows[0].items() if not isinstance(v, (dict, list)) or k in ("ports", "tags")]
-    cell = lambda v: ",".join(map(str, v)) if isinstance(v, list) else str(v)  # noqa: E731
+    keys = dict.fromkeys(k for r in rows for k in r)  # union, first-seen order: rows may differ (e.g. a host that's down)
+    sample = {k: next(r[k] for r in rows if k in r) for k in keys}
+    # scalars and lists of scalars fit a cell; nested objects don't
+    cols = [k for k, v in sample.items()
+            if not isinstance(v, dict) and not (isinstance(v, list) and any(isinstance(x, (dict, list)) for x in v))]
+    cell = lambda v: "; ".join(map(str, v)) if isinstance(v, list) else "" if v is None else str(v)  # noqa: E731
     widths = {c: max(len(c), *(len(cell(r.get(c, ""))) for r in rows)) for c in cols}
     lines = ["  ".join(c.upper().ljust(widths[c]) for c in cols)]
     lines += ["  ".join(cell(r.get(c, "")).ljust(widths[c]) for c in cols) for r in rows]

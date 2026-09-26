@@ -1,6 +1,6 @@
 ---
 name: docker
-description: Inspect, diagnose, and manage Docker containers, images, networks, and volumes, and operate the services inside them (Postgres, MySQL/MariaDB, SQLite, Redis, MongoDB, nginx and other web servers), through the stdlib-only `aisb` CLI (JSON output, tiered safety). Use when the user asks about running containers, docker logs, why a container is crashing / restarting / unhealthy / OOM-killed, port or network problems, disk usage and cleanup, building or running images, executing a command in a container, querying or dumping a database in a container, inspecting Redis keys, checking what queries are running or blocked, reloading nginx, calling a container's HTTP endpoint, reading files from a container, bringing up a multi-service dev stack, rehearsing a migration on a copy of a database, comparing schemas or container configs, debugging why one container can't reach another, security-auditing containers or finding leaked secrets in images, backing up volumes, slimming images, watching a deploy, inspecting Kafka topics/consumer lag, RabbitMQ queues or Elasticsearch indices, undoing Docker changes, finding the root cause of an outage across services, capturing crashes of short-lived containers, packaging a bug reproduction, mapping which services actually talk to each other, checking missing or misspelled env vars, SBOMs and image diffs, sampling or seeding a database, finding missing indexes, chaos / resilience testing, recording and replaying HTTP traffic, right-sizing memory and CPU limits, opening a local Docker dashboard, or managing Docker on remote hosts with pyinfra.
+description: Inspect, diagnose, and manage Docker containers, images, networks, and volumes, and operate the services inside them (Postgres, MySQL/MariaDB, SQLite, Redis, MongoDB, nginx and other web servers), through the stdlib-only `aisb` CLI (JSON output, tiered safety). Use when the user asks about running containers, docker logs, why a container is crashing / restarting / unhealthy / OOM-killed, port or network problems, disk usage and cleanup, building or running images, executing a command in a container, querying or dumping a database in a container, inspecting Redis keys, checking what queries are running or blocked, reloading nginx, calling a container's HTTP endpoint, reading files from a container, bringing up a multi-service dev stack, rehearsing a migration on a copy of a database, comparing schemas or container configs, debugging why one container can't reach another, security-auditing containers or finding leaked secrets in images, backing up volumes, slimming images, watching a deploy, inspecting Kafka topics/consumer lag, RabbitMQ queues or Elasticsearch indices, undoing Docker changes, finding the root cause of an outage across services, capturing crashes of short-lived containers, packaging a bug reproduction, mapping which services actually talk to each other, checking missing or misspelled env vars, SBOMs and image diffs, sampling or seeding a database, finding missing indexes, chaos / resilience testing, recording and replaying HTTP traffic, right-sizing memory and CPU limits, opening a local Docker dashboard, managing Docker on remote hosts with pyinfra, or managing, grouping and monitoring many remote machines at once (a fleet).
 ---
 
 # Docker via `aisb`
@@ -103,6 +103,25 @@ Rules: prefer `db query` over `db exec` for anything read-only. Put `LIMIT` in e
 | Did my refactor change responses? | `http record NAME --out t.jsonl [--via tcpdump]`, `http replay t.jsonl --to NEW` | Volatile values are masked; replay defaults to GET/HEAD. |
 | Memory/CPU limits | `system rightsize --seconds 120`, then `containers limit NAME --memory 256m --cpus 0.5` | Recommendations from p95/peak plus headroom; `limit` applies live without recreating. Sample under realistic load. |
 | A UI for the human | `aisb portal [--allow mutate]` | Local web dashboard, token-protected, loopback only, never destroy. Tell the user the URL; don't run it unattended. |
+
+## Fleets: many machines
+
+Machines live in an inventory (`aisb fleet hosts`, `aisb fleet groups`). Targets are selectors: `all`, `web1`, `web*`, `@group`, `region=eu`, combined with `,` (union), `&` (intersect) and `!` (exclude). Remote hosts need only sshd and Docker.
+
+| Need | Command |
+|---|---|
+| Which machines need attention | `fleet status TARGET` (verdict and reasons per host, worst first); `fleet doctor TARGET` for the container problems |
+| Keep an eye on it | `fleet watch TARGET --until-change` |
+| Any aisb op on many hosts | `fleet query` (read), `fleet apply` (mutate, `--dry-run` for per-host plans), `fleet destroy` (plan plus exit 3 until `--yes`). The op goes after `--`, e.g. `fleet query @web -- containers logs api --tail 50` |
+| Rolling change | `fleet apply @web --batch 1 --fail-fast -- containers restart api` |
+| Image without a registry | `fleet ship IMAGE TARGET` |
+| On the machines themselves | `fleet shell TARGET -- CMD` (mutate: arbitrary commands, preview with `--dry-run`) |
+
+Rules:
+- Resolve the target with `fleet hosts TARGET` and show the host list before any fleet-wide change.
+- Prefer `--batch 1 --fail-fast` for restarts and deploys, so one bad host stops the rollout.
+- Approval for `fleet destroy` covers the op **and** the listed hosts.
+- A `down` host is reported, not retried. Quote its reason (SSH error, or the Docker socket permission hint).
 
 ## Remote hosts and pyinfra
 

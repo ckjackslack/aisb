@@ -442,6 +442,55 @@ class System(Resource, name="system"):
                 "summary": {f: sum(f in r.get("flags", []) for r in out)
                             for f in ("at-risk", "over-provisioned", "unlimited", "idle")}}
 
+    @op(Tier.MUTATE)
+    def remediate(self, *, rule: Annotated[list[str] | None, "only these rules: start-exited, restart-unhealthy, "
+                                                        "raise-memory (default: all)"] = None,
+                  container: Annotated[list[str] | None, "only these containers"] = None,
+                  tail: Annotated[int, "log lines scanned per container by the triage"] = 200,
+                  max_actions: Annotated[int, "stop after this many actions"] = 10) -> dict[str, Any]:
+        """Fix what's safe to fix automatically, suggest the rest: start exited containers, restart unhealthy ones,
+        raise the memory limit after an OOM kill (live update). Causes that need a person (missing env, crash
+        loops, bad mounts...) become suggestions. --dry-run shows the plan; every action is an audited aisb op
+        (policy applies). Fleet-wide: `fleet apply @prod -- system remediate`."""
+        from .. import context
+        from ..client import Docker
+        from ..insights import remediate as rm
+        from ..ops import get_op, invoke
+        from .containers import Containers
+        rules = tuple(rule or rm.RULES)
+        if unknown := set(rules) - set(rm.RULES):
+            raise ValueError(f"unknown rule(s) {sorted(unknown)} (rules: {', '.join(rm.RULES)})")
+        ctr = Containers(self.t)
+        fleet_doc = self.doctor(tail=tail)
+        targets = [p["container"] for p in fleet_doc["problems"] if not container or p["container"] in container]
+        actions, suggestions, results = [], [], []
+        for name in targets:
+            rep = ctr.doctor(name, tail=tail, stats=False)
+            p = rm.plan(rep, self.t.json("GET", f"/containers/{q(name)}/json") or {}, rules=rules)
+            actions += p.actions
+            suggestions += p.suggestions
+        actions = actions[:max_actions]
+        client = Docker.from_transport(self.t)
+        for a in actions:
+            o = get_op(a.op)
+            if self.t.planning:          # the outer dry-run records the calls; nothing is sent
+                self.t.note(remediate=a.rule, container=a.container, op=a.op, why=a.why)
+                o.call(client, a.kwargs)
+                results.append({**a.row(), "status": "planned"})
+                continue
+            try:
+                with context.use(source=context.current().source):
+                    res = invoke(client, o, a.kwargs, confirm=True)
+                results.append({**a.row(), "status": "done", "result": res.result})
+            except (DockerError, ValueError) as e:
+                results.append({**a.row(), "status": "failed", "error": str(e)})
+        if self.t.planning:
+            for sug in suggestions:
+                self.t.note(**sug)
+        failed = [r for r in results if r["status"] == "failed"]
+        return {"actions": results, "suggestions": suggestions, "checked": len(targets),
+                **({"ok": False, "reason": f"{len(failed)} action(s) failed"} if failed else {})}
+
     @op(Tier.READ)
     def snapshot(self) -> dict[str, Any]:
         """Inventory of containers, images, volumes and networks; save it and diff later with `system changes`."""

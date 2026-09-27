@@ -392,6 +392,140 @@ class Fleet(Resource, name="fleet"):
                             host_timeout=host_timeout)
         return {"image": image, "tags": tags, "bytes": size, **out}
 
+    # --- logs and canary analysis ------------------------------------------------------------------
+
+    @op(Tier.READ)
+    def logs(self, target: Target, container: Annotated[str, "container name on every selected host"], *,
+             since: Annotated[str, "window: 10m, 1h, a timestamp"] = "10m",
+             tail: Annotated[int, "max lines per host"] = 500,
+             grep: Annotated[str | None, "only lines matching this regex"] = None,
+             follow: Annotated[bool, "keep collecting new lines for --seconds"] = False,
+             seconds: Annotated[float, "with --follow: how long to collect"] = 30.0,
+             patterns: Annotated[bool, "fingerprint the merged stream instead of listing it"] = False,
+             max_bytes: Annotated[int, "output cap"] = 64 * 1024,
+             parallel: Parallel = 16, host_timeout: HostTimeout = None, inventory: Inv = None) -> dict[str, Any]:
+        """One container's logs across hosts as a single timeline (Docker timestamps), each line tagged with its
+        host. --follow polls with a moving `since` watermark, so no long-lived streams are held over SSH."""
+        import heapq
+        import re
+
+        from ..insights import fingerprint
+        from ..util import docker_time, to_unix
+        from .containers import Containers
+        rx = re.compile(grep) if grep else None
+        hosts = Inventory.load(inventory).select(target)
+        watermark = {h.name: to_unix(since) for h in hosts}
+        seen: dict[str, set[tuple[float, str]]] = {h.name: set() for h in hosts}
+        merged: list[tuple[float, str, str]] = []
+        errors: dict[str, str] = {}
+
+        def pull(h: Host) -> list[tuple[float, str, str]]:
+            with runner.docker(h) as d:
+                text = Containers(d.transport)._text(container, tail=tail, since=str(watermark[h.name]), timestamps=True)
+            out = []
+            for line in text.splitlines():
+                ts, _, msg = line.partition(" ")
+                if (t := docker_time(ts)) is None or (t, msg) in seen[h.name] or (rx and not rx.search(msg)):
+                    continue
+                seen[h.name].add((t, msg))
+                out.append((t, h.name, msg))
+            if out:
+                watermark[h.name] = int(out[-1][0])
+            return out
+
+        deadline = time.monotonic() + (seconds if follow else 0)
+        with runner.pooled():
+            while True:
+                results, _ = runner.fan_out(hosts, pull, parallel=parallel, host_timeout=host_timeout)
+                for r in results:
+                    if r.ok:
+                        merged = list(heapq.merge(merged, r.result))
+                    else:
+                        errors[r.host] = r.error or "failed"
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
+        if patterns:
+            return {"container": container, "hosts": len(hosts), **fingerprint([f"[{h}] {m}" for _, h, m in merged], top=20),
+                    **({"errors": errors} if errors else {})}
+        width = max((len(h.name) for h in hosts), default=4)
+        lines = [f"{time.strftime('%H:%M:%S', time.gmtime(t))}.{int(t % 1 * 1000):03d} {h:<{width}} | {m}"
+                 for t, h, m in merged]
+        return {"container": container, "hosts": len(hosts), "lines": len(lines),
+                **clip("\n".join(lines) + ("\n" if lines else ""), max_bytes), **({"errors": errors} if errors else {})}
+
+    def _canary_side(self, hosts: list[Host], container: str, since: str, http_path: str | None, port: int | None,
+                     probes: int, host_timeout: float | None) -> dict[str, Any]:
+        from ..insights import fingerprint
+        from ..util import to_unix
+        from .containers import Containers
+        from .http import Http
+        window_min = max((time.time() - to_unix(since)) / 60, 1 / 60)
+
+        def one(h: Host) -> dict[str, Any]:
+            with runner.docker(h) as d:
+                ctr = Containers(d.transport)
+                rep = ctr.doctor(container, tail=500, stats=False)
+                text = ctr._text(container, since=since)
+                fp = fingerprint(text.splitlines(), top=50, min_level="warn")
+                errors = sum(p["count"] for p in fp["top"] if p["level"] in ("error", "fatal", "critical"))
+                out = {"verdict": rep["verdict"], "restarts": rep["state"].get("restarts") or 0,
+                       "errors_per_min": round(errors / window_min, 3)}
+                if http_path:
+                    lat, bad = [], 0
+                    for _ in range(probes):
+                        r = Http(d.transport).get(container, http_path, port=port)
+                        bad += 0 if r.get("ok") else 1
+                        if r.get("total_ms") is not None:
+                            lat.append(r["total_ms"])
+                    out.update(http_errors=bad, p50_ms=sorted(lat)[len(lat) // 2] if lat else None)
+                return out
+        results, _ = runner.fan_out(hosts, one, parallel=16, host_timeout=host_timeout)
+        rows = {r.host: r.result for r in results if r.ok}
+        vals = lambda k: [v[k] for v in rows.values() if v.get(k) is not None]  # noqa: E731
+        avg = lambda xs: round(sum(xs) / len(xs), 3) if xs else None  # noqa: E731
+        return {"hosts": rows, "unreachable": {r.host: r.error for r in results if not r.ok},
+                "errors_per_min": avg(vals("errors_per_min")), "restarts": sum(vals("restarts")),
+                "failing": sorted(h for h, v in rows.items() if v["verdict"] == "failing"),
+                "http_errors": sum(vals("http_errors")) if http_path else None, "p50_ms": avg(vals("p50_ms"))}
+
+    @op(Tier.READ)
+    def canary(self, canary: Target, baseline: Target, *, container: Annotated[str, "the service's container name"],
+               since: Annotated[str, "compare this window"] = "10m",
+               http: Annotated[str | None, "also probe this HTTP path (e.g. /healthz) on both groups"] = None,
+               port: Annotated[int | None, "container port for --http"] = None,
+               probes: Annotated[int, "HTTP requests per host"] = 5,
+               max_error_ratio: Annotated[float, "no-go if the canary logs more than this x baseline errors/min"] = 2.0,
+               max_latency_ratio: Annotated[float, "no-go if canary p50 latency exceeds this x baseline"] = 1.5,
+               host_timeout: HostTimeout = None, inventory: Inv = None) -> dict[str, Any]:
+        """Go/no-go for a canary: compare error-line rate, restarts, verdicts and (optionally) HTTP errors and
+        latency between canary and baseline hosts. Exit 4 on no-go, so it gates runbooks and CI directly."""
+        inv = Inventory.load(inventory)
+        c_hosts, b_hosts = inv.select(canary), inv.select(baseline)
+        if overlap := {h.name for h in c_hosts} & {h.name for h in b_hosts}:
+            raise ValueError(f"canary and baseline overlap: {sorted(overlap)}")
+        with runner.pooled():
+            c = self._canary_side(c_hosts, container, since, http, port, probes, host_timeout)
+            b = self._canary_side(b_hosts, container, since, http, port, probes, host_timeout)
+        reasons = []
+        if c["unreachable"]:
+            reasons.append(f"canary hosts unreachable: {', '.join(c['unreachable'])}")
+        if c["failing"]:
+            reasons.append(f"canary {container} failing on {', '.join(c['failing'])}")
+        if c["restarts"] > b["restarts"]:
+            reasons.append(f"canary restarts {c['restarts']} > baseline {b['restarts']}")
+        ce, be = c["errors_per_min"] or 0, b["errors_per_min"] or 0
+        if ce > max_error_ratio * be + 0.5:   # +0.5/min so a quiet baseline doesn't make one error a no-go
+            reasons.append(f"canary errors {ce}/min vs baseline {be}/min (limit x{max_error_ratio})")
+        if http:
+            if (c["http_errors"] or 0) > (b["http_errors"] or 0):
+                reasons.append(f"canary HTTP errors {c['http_errors']} > baseline {b['http_errors']}")
+            if c["p50_ms"] and b["p50_ms"] and c["p50_ms"] > max_latency_ratio * b["p50_ms"]:
+                reasons.append(f"canary p50 {c['p50_ms']}ms vs baseline {b['p50_ms']}ms (limit x{max_latency_ratio})")
+        go = not reasons
+        return {"go": go, "canary": c, "baseline": b, "reasons": reasons,
+                **({} if go else {"ok": False, "reason": "no-go: " + "; ".join(reasons)})}
+
     # --- desired state ------------------------------------------------------------------------------
 
     def _stack_rows(self, d: Any) -> list[dict[str, Any]]:

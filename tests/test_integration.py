@@ -284,3 +284,12 @@ def test_net_tls_live(docker, name, tmp_path):
     res = docker.net.tls(name, port=443, server_name="aisb.test")
     assert res["san"] == ["aisb.test"] and res["self_signed"] and not res["verified"]
     assert 29 <= res["days_left"] <= 30 and res["ok"]
+
+
+def test_system_remediate_live(docker, name):
+    docker.containers.run(IMAGE, "sh", "-c", "exit 3", name=name, detach=True)
+    docker.containers.wait_for(name, exited=True, within=10, interval=0.2)
+    plan = invoke(docker, get_op("system.remediate"), {"container": [name]}, dry_run=True)
+    assert any(p.get("remediate") == "start-exited" for p in plan.planned)
+    out = docker.system.remediate(container=[name])
+    assert [(a["container"], a["rule"], a["status"]) for a in out["actions"]] == [(name, "start-exited", "done")]

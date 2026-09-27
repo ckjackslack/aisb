@@ -10,7 +10,17 @@ class Docker:
     """Facade over the resource APIs: ``Docker().containers.ls(all=True)``, ``Docker().db.query("pg", "select 1")``."""
 
     def __init__(self, host: str | None = None, *, timeout: float | None = 60.0, version: str | None = None) -> None:
-        t = self.transport = Transport(resolve_endpoint(host), timeout=timeout, version=version)
+        self._bind(Transport(resolve_endpoint(host), timeout=timeout, version=version))
+
+    @classmethod
+    def from_transport(cls, transport: Transport) -> "Docker":
+        """A facade over an existing transport (same endpoint, dialer, dry-run state), e.g. inside a fleet tunnel."""
+        obj = cls.__new__(cls)
+        obj._bind(transport)
+        return obj
+
+    def _bind(self, t: Transport) -> None:
+        self.transport = t
         self.containers, self.images, self.networks, self.volumes = Containers(t), Images(t), Networks(t), Volumes(t)
         self.system, self.stack, self.net = System(t), StackOps(t), Net(t)
         self.svc, self.db, self.redis, self.mongo = Svc(t), Db(t), RedisOps(t), MongoOps(t)

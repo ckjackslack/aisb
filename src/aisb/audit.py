@@ -117,7 +117,12 @@ def _mirror(rec: Mapping[str, Any]) -> None:
                 handler = logging.handlers.SysLogHandler(target)
         except (OSError, ValueError):
             return
-        logger = logging.getLogger(f"aisb.audit.{len(_SYSLOG)}")
+        # named by target, and emptied first: loggers are process-global, so a counter-based name could hand
+        # a reloaded config the previous target's handler too
+        logger = logging.getLogger(f"aisb.audit.syslog.{target}")
+        for old in list(logger.handlers):
+            logger.removeHandler(old)
+            old.close()
         logger.propagate, logger.level = False, logging.INFO
         logger.addHandler(handler)
         _SYSLOG[target] = logger

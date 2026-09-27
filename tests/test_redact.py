@@ -101,3 +101,14 @@ def test_capsule_load_refuses_until_command_secrets_are_supplied(client, daemon,
     assert "auth.password" not in body["Labels"] and body["Labels"]["team"] == "shop"  # unsupplied label: left out
     assert "label:auth.password" in r["missing_secrets"]
     assert "<redacted" not in json.dumps(body)
+
+
+@pytest.mark.parametrize(("test", "masked", "names"), [
+    (["CMD", "check", "--token", "t0k"], ["CMD", "check", "--token", "<redacted:health:--token>"], ["health:--token"]),
+    (["CMD-SHELL", "curl -fsS http://u:pw1@x/health"], ["CMD-SHELL", "curl -fsS 'http://u:<redacted:health:2>@x/health'"],
+     ["health:2"]),
+    (["NONE"], ["NONE"], []),
+    ([], [], []),
+])
+def test_healthcheck_forms(test, masked, names):
+    assert redact.healthcheck(test) == (masked, names)

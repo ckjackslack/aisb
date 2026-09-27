@@ -109,7 +109,9 @@ def fake_psql(state: dict[str, Any]) -> Any:
             return b"", b"", 0
         sql = cmd[cmd.index("-c") + 1]
         if sql == "show server_version_num":
-            return csv_out("server_version_num", "160004")
+            return csv_out("server_version_num", state.get("version", "160004"))
+        if "from pg_namespace" in sql:
+            return csv_out("nspname", "public", "sales")
         if "from pg_roles" in sql:
             return csv_out("?column?", *(["1"] if state.get("role") else []))
         if cmd[cmd.index("-U") + 1] == "aisb_ro" and not state.get("login", True):
@@ -239,3 +241,36 @@ def test_roles_are_refused_for_other_engines(daemon, capsys, host):
     Engine(daemon, "r", info("r", "redis:7"), lambda c, e: (b"", b"", 0))
     code, _, err = cli_runner(host, capsys)("db", "grant-readonly", "r")
     assert code != EXIT_OK and "redis" in err
+
+
+def test_legacy_postgres_grants_per_schema_in_each_database(pg):
+    run, state, host = pg
+    state["version"] = "130012"
+    code, out, _ = run("db", "grant-readonly", "pg", "--database", "shop", "--database", "crm")
+    assert code == EXIT_OK and out["scope"] == "databases ['shop', 'crm']"
+    # role first (default database), then grants inside each database it may read
+    assert state["scripts"] == [("app", "shop"), ("app", "shop"), ("app", "crm")]
+    assert roles.load(f"local:{host}/pg").databases == ["shop", "crm"]
+
+
+@pytest.mark.parametrize(("listing", "expected"), [
+    (["information_schema", "mysql", "performance_schema", "sys", "shop", "crm"], ["shop", "crm"]),
+    (["information_schema", "mysql", "performance_schema", "sys"], None),
+])
+def test_mysql_without_a_default_database_grants_every_user_database(daemon, capsys, host, listing, expected):
+    from test_services_more import info, xml
+    bare = info("maria", "mariadb:11", env=("MARIADB_ROOT_PASSWORD=rootpw",))
+    rows = [{"Database": n} for n in listing]
+
+    def handle(cmd: list[str], env: dict[str, str]) -> tuple[bytes, bytes, int]:
+        if "-e" in cmd and "show databases" in cmd[cmd.index("-e") + 1]:
+            return xml(rows), b"", 0
+        return b"", b"", 0
+    daemon.on("PUT", "/containers/maria/archive", status=200)
+    Engine(daemon, "maria", bare, handle)
+    code, out, err = cli_runner(host, capsys)("db", "grant-readonly", "maria")
+    if expected is None:
+        assert code != EXIT_OK and "no user databases" in err and roles.load(f"local:{host}/maria") is None
+    else:
+        assert code == EXIT_OK and out["scope"] == f"databases {expected}"
+

@@ -39,8 +39,13 @@ jobs:
       - name: pull images used by the live tests
         run: |
           for i in alpine:3.20 busybox:1.36 nginx:alpine redis:7-alpine postgres:16-alpine; do docker pull -q "$i"; done
-      - name: unit + live tests (the runner has a Docker daemon)
-        run: pytest -q
+      - name: unit + live tests with branch coverage (the runner has a Docker daemon)
+        run: pytest -q --cov --cov-report=term --cov-report=xml
+      - uses: actions/upload-artifact@v4
+        if: matrix.python == '3.12'
+        with:
+          name: coverage
+          path: coverage.xml
 
   bundle:
     runs-on: ubuntu-latest

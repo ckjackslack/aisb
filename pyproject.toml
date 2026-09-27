@@ -14,7 +14,7 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10"]
+dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.6", "mypy>=1.10"]
 pyinfra = ["pyinfra>=3.1"]
 
 [project.scripts]
@@ -55,3 +55,13 @@ check_untyped_defs = true
 pythonpath = ["src"]
 testpaths = ["tests"]
 markers = ["docker: needs a reachable Docker daemon (auto-skipped otherwise)"]
+
+[tool.coverage.run]
+source = ["aisb"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 76
+exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError", "if __name__ == .__main__.:"]

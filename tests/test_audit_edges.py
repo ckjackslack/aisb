@@ -134,3 +134,19 @@ def test_log_in_a_new_directory_is_created_private(tmp_path, monkeypatch):
     assert oct(p.parent.stat().st_mode & 0o777) == "0o700"   # it can hold redacted-but-sensitive arguments
     stored = json.loads(p.read_text())
     assert isinstance(stored["ts"], float) and stored["ts"] == round(stored["ts"], 3)
+
+
+@pytest.mark.parametrize("syslog_server", ["udp"], indirect=True)
+def test_mirror_reuses_its_handler_and_replaces_a_stale_one(log, syslog_server):
+    target, got = syslog_server
+    Path(os.environ["AISB_CONFIG"]).write_text(f'[audit]\nsyslog = "{target}"\n')
+    config.reset()
+    rec(ref="a")
+    (logger,) = audit._SYSLOG.values()
+    first = logger.handlers[0]
+    rec(ref="b")
+    assert logger.handlers == [first]           # one connection per target, not one per record
+    audit._SYSLOG.clear()                       # a fresh cache over the same process-global logger
+    rec(ref="c")
+    assert len(logger.handlers) == 1 and logger.handlers[0] is not first
+    assert _wait_for(got, 3).count(b"aisb: ") == 3

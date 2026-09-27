@@ -117,8 +117,8 @@ def _mirror(rec: Mapping[str, Any]) -> None:
                 handler = logging.handlers.SysLogHandler(target)
         except (OSError, ValueError):
             return
-        # named by target, and emptied first: loggers are process-global, so a counter-based name could hand
-        # a reloaded config the previous target's handler too
+        # named by target, and emptied first: loggers are process-global, so a fresh cache (a reset in tests,
+        # a re-imported module) must not inherit an earlier handler
         logger = logging.getLogger(f"aisb.audit.syslog.{target}")
         for old in list(logger.handlers):
             logger.removeHandler(old)

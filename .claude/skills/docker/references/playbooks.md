@@ -187,3 +187,34 @@ Stop *looking for causes* at the first step that explains the problem. Still gat
    - then `aisb fleet apply TARGET --batch 1 --fail-fast -- ...`;
    - then `aisb fleet status TARGET`.
 5. Finish with `aisb fleet watch TARGET --interval 30 --duration 600 --until-change`, and report any events.
+
+## Rollout via runbook with a canary gate
+
+1. `aisb runbook list`; pick the runbook, or draft one (steps: ship → replace canary → `fleet canary` gate with `retry` → `approve` → the rest with `--batch 1 --fail-fast` → an `always` notify step). Show the file.
+2. `aisb runbook plan NAME --var image=...`: show the per-host plan, any `would be DENIED` lines, and the approvals it will ask for.
+3. After the user approves the whole plan: `aisb runbook run NAME --var image=... --yes` (with `--ticket` if they gave one).
+4. On `status: waiting` (exit 4): quote the approval prompt and the gate result (`aisb runbook show RUN`), then wait. Run `aisb runbook approve RUN --resume` or `--deny` only on the user's word.
+5. On failure: `aisb runbook show RUN`, diagnose the failed step, and after a fix `aisb runbook resume RUN --yes`. Completed steps are not re-run.
+
+## GitOps: desired state, drift, converge
+
+1. `aisb fleet diff STATE all`: per host and stack, `missing`, `stopped`, `drift`, `ok`, plus `unassigned_stacks`.
+2. Missing or stopped: `aisb fleet converge STATE TARGET --dry-run`, show the plan, then run it with `--batch 1 --fail-fast`.
+3. Drift means the running config differs from the file. Show which services drifted; `aisb fleet replace-drifted STATE TARGET` prints the replacement plan (exit 3). Only with approval: `--yes --batch 1`. Volumes are kept.
+4. Finish with `aisb fleet diff STATE TARGET` again and report `converged` hosts.
+5. From compose: `aisb stack import docker-compose.yml --out stacks/NAME.json`; report `unsupported` keys and `notes` before deploying.
+
+## Security sweep: CVEs, stale images, certificates
+
+1. `aisb fleet query all -- system audit --min-severity high` for configuration risks.
+2. `aisb images updates` (or `fleet query all -- images updates`): running images whose registry tag moved.
+3. For each image in use: `aisb images vulns REF --min-severity high`; list ids, severity and `fixed` versions. If OSV is unreachable, say so.
+4. `aisb net tls NAME --port 443 --server-name HOST` for each TLS endpoint; flag `days_left < 14` and hostname mismatches.
+5. Report a table (host, image, issue, fix) and propose rebuild/pull + rolling redeploy; no changes without approval.
+
+## Self-healing with remediate
+
+1. `aisb system remediate --dry-run` (or `fleet apply TARGET --dry-run -- system remediate`): list `actions` (rule, container, why) and `suggestions`.
+2. Suggestions need a human decision (missing env, auth, DNS, disk full, crash loop): present them with the evidence; don't restart around them.
+3. With approval, run it, optionally narrowed with `--rule` / `--container` / `--max-actions`, then `aisb system doctor` to confirm.
+4. Everything it does is audited and journaled, so it can be undone inside a session (`session rollback`).

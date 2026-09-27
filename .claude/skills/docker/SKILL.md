@@ -1,6 +1,6 @@
 ---
 name: docker
-description: Inspect, diagnose, and manage Docker containers, images, networks, and volumes, and operate the services inside them (Postgres, MySQL/MariaDB, SQLite, Redis, MongoDB, nginx and other web servers), through the stdlib-only `aisb` CLI (JSON output, tiered safety). Use when the user asks about running containers, docker logs, why a container is crashing / restarting / unhealthy / OOM-killed, port or network problems, disk usage and cleanup, building or running images, executing a command in a container, querying or dumping a database in a container, inspecting Redis keys, checking what queries are running or blocked, reloading nginx, calling a container's HTTP endpoint, reading files from a container, bringing up a multi-service dev stack, rehearsing a migration on a copy of a database, comparing schemas or container configs, debugging why one container can't reach another, security-auditing containers or finding leaked secrets in images, backing up volumes, slimming images, watching a deploy, inspecting Kafka topics/consumer lag, RabbitMQ queues or Elasticsearch indices, undoing Docker changes, finding the root cause of an outage across services, capturing crashes of short-lived containers, packaging a bug reproduction, mapping which services actually talk to each other, checking missing or misspelled env vars, SBOMs and image diffs, sampling or seeding a database, finding missing indexes, chaos / resilience testing, recording and replaying HTTP traffic, right-sizing memory and CPU limits, opening a local Docker dashboard, managing Docker on remote hosts with pyinfra, or managing, grouping and monitoring many remote machines at once (a fleet).
+description: Inspect, diagnose, and manage Docker containers, images, networks, and volumes, and operate the services inside them (Postgres, MySQL/MariaDB, SQLite, Redis, MongoDB, nginx and other web servers), through the stdlib-only `aisb` CLI (JSON output, tiered safety). Use when the user asks about running containers, docker logs, why a container is crashing / restarting / unhealthy / OOM-killed, port or network problems, disk usage and cleanup, building or running images, executing a command in a container, querying or dumping a database in a container, inspecting Redis keys, checking what queries are running or blocked, reloading nginx, calling a container's HTTP endpoint, reading files from a container, bringing up a multi-service dev stack, rehearsing a migration on a copy of a database, comparing schemas or container configs, debugging why one container can't reach another, security-auditing containers or finding leaked secrets in images, backing up volumes, slimming images, watching a deploy, inspecting Kafka topics/consumer lag, RabbitMQ queues or Elasticsearch indices, undoing Docker changes, finding the root cause of an outage across services, capturing crashes of short-lived containers, packaging a bug reproduction, mapping which services actually talk to each other, checking missing or misspelled env vars, SBOMs and image diffs, sampling or seeding a database, finding missing indexes, chaos / resilience testing, recording and replaying HTTP traffic, right-sizing memory and CPU limits, opening a local Docker dashboard, managing Docker on remote hosts with pyinfra, managing, grouping and monitoring many remote machines at once (a fleet), change policies and audit trails, runbooks with approvals, desired-state (GitOps) convergence and drift, importing docker-compose files or host inventories, capacity forecasts and alerts, Prometheus metrics, CVE scans of images, outdated image tags, expiring TLS certificates, self-healing remediation, or canary go/no-go checks.
 ---
 
 # Docker via `aisb`
@@ -28,6 +28,7 @@ Commands for `run` / `exec` always go **after `--`**:
 | 2 | usage error | fix the arguments |
 | 3 | **confirmation required**; planned requests on stdout | show the plan to the user, then stop and ask |
 | 4 | condition not met (`"ok": false`, e.g. `wait`) | read `reason` and `log_tail`, then run `doctor` |
+| 5 | **denied by policy**; the rule and reason on stderr | quote the rule to the user; never try to get around it |
 
 Endpoint comes from `--host` or `$DOCKER_HOST`, falling back to the local socket. Run `aisb system ping` first if unsure.
 
@@ -123,6 +124,31 @@ Rules:
 - Approval for `fleet destroy` covers the op **and** the listed hosts.
 - A `down` host is reported, not retried. Quote its reason (SSH error, or the Docker socket permission hint).
 
+## Platform: policy, runbooks, desired state, monitoring, supply chain
+
+| Need | Command |
+|---|---|
+| Would this be allowed? | `policy check [--on HOST] [--source mcp] -- RESOURCE OP ...`; `policy rules` |
+| Who changed what | `audit log --since 1d [--action 'fleet.*'] [--on HOST] [--failed] [--run ID]`; `audit verify` |
+| Effective settings | `config show` (profile, defaults, aliases, sinks) |
+| Repeatable procedure | `runbook list`, `runbook plan NAME`, `runbook run NAME` (destroy tier), `runbook pending`, `runbook show RUN` |
+| Desired vs actual | `fleet diff STATE TARGET`; fix with `fleet converge` (mutate) or `fleet replace-drifted` (destroy) |
+| Migrate compose | `stack import docker-compose.yml --out stacks/X.json`; read `unsupported` and `notes` back to the user |
+| History and capacity | `fleet trends TARGET --since 7d` (disk-full forecast), `fleet report TARGET --slo 99.9` |
+| Alert someone | `notify list`; `notify send SINK --title ... --text ...` (mutate) |
+| CVEs / stale tags / certs | `images vulns REF --min-severity high`, `images updates`, `net tls NAME --port 443` |
+| Self-healing | `system remediate --dry-run` first; `suggestions` are for the user, not for you to force |
+| Canary gate | `fleet canary CANARY BASELINE --container NAME [--http /healthz --port N]` (`"go"`; no-go exits 4) |
+| Logs across hosts | `fleet logs TARGET CONTAINER --since 10m [--patterns]` |
+
+Rules:
+- **Exit 5 is final for you.** Report the rule and what it requires (a ticket, a time window, a human). Never retry with a different source, host alias, profile, or an equivalent op (e.g. `fleet shell` instead of `containers rm`) to get around it.
+- Pass `--ticket ID` only when the user gave you that ticket; never invent one.
+- Before `runbook run`, show `runbook plan` output. `runbook run --yes` needs approval for the whole plan; `approve` steps are for the human, so answer them with `runbook approve` only when the user says so, and quote the prompt.
+- Gate rollouts with `fleet canary` or `fleet status --fail-on degraded`, and stop at the first no-go.
+- `system remediate` and `fleet converge` are mutate: `--dry-run` first unless the user asked for the change.
+- `images vulns` needs egress to api.osv.dev; on a 403/timeout say so rather than reporting "no vulnerabilities".
+
 ## Remote hosts and pyinfra
 
 - `aisb bundle aisb.pyz` writes aisb as one file. It needs only `python3` >= 3.11 on the target, so for a one-off remote check copy it over and run `python3 aisb.pyz system doctor` there.
@@ -130,7 +156,7 @@ Rules:
 - `operations.call` refuses destroy-tier ops without `confirm=True`. Only set it (or `stack(recreate_drifted=True)`, `stack(present=False)`) after the user approved that change.
 - `pyinfra @aisb/NAME ...` or `@aisb/stack:NAME` targets running containers through the Engine API, so ordinary pyinfra operations (files, server) work inside them.
 
-MCP: `aisb mcp` serves every op as a tool (`--max-tier read` for a read-only toolset). Destroy tools need `confirm=true`, and the same approval rules apply.
+MCP: `aisb mcp` serves every op as a tool (`--max-tier read` for a read-only toolset). Destroy tools need `confirm=true`, and the same approval rules apply. It also serves resources (`aisb://fleet/status`, `aisb://runbooks/pending`, `aisb://audit/recent`, `aisb://policy/rules`) and prompts (`investigate-incident`, `rollout`, `daily-check`, one per runbook). Policy denials come back as tool errors: treat them like exit 5.
 
 ## Safety rules (non-negotiable)
 
@@ -175,5 +201,10 @@ For multi-step tasks, read [references/playbooks.md](references/playbooks.md) an
 - Performance: missing indexes and right-sizing.
 - Resilience game day.
 - Verify a refactor with recorded traffic.
+- Fleet triage and rolling changes.
+- Rollout via runbook with a canary gate.
+- GitOps: desired state, drift, converge.
+- Security sweep: CVEs, stale images, certificates.
+- Self-healing with remediate.
 
 End every diagnosis with: **evidence** (quoted fields and log lines), **root-cause hypothesis**, and **proposed fix**, including the exact command. Mark it destroy-tier if it is one.

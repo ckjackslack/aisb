@@ -172,7 +172,7 @@ Execution details:
   `continue_on_error`.
 - There is no per-step timeout: an in-process op can't be killed safely mid-flight, so bound fleet steps with
   `--host-timeout` instead.
-- Runs persist in `$AISB_HOME/runbooks/RUN/state.json` and audit with `run_id`.
+- Runs persist in `$AISB_HOME/runs/RUN/state.json` and audit with `run_id`.
 
 ## 8. Desired state
 

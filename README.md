@@ -151,6 +151,84 @@ Idempotency is real: a second run of the deploy above reports "No change" for ev
 readiness gate. Stack drift (a changed service config) is reported and left running unless
 `recreate_drifted=True`, which is the explicit approval to replace those containers (volumes are kept).
 
+## Platform: guardrails, automation, operations at scale
+
+Everything below is one layer over the same op registry, so it applies equally to the CLI, the MCP server, the portal,
+runbooks and fleet fan-outs. Design: [docs/design/platform.md](docs/design/platform.md).
+
+**Guardrails.** `~/.aisb/config.toml` (or `$AISB_CONFIG`) holds per-op flag defaults, aliases, profiles, notify
+sinks, plugins and **policy rules**. Denied changes exit **5** (previews say "would be DENIED"). Every mutate/destroy
+lands in a **hash-chained audit log** with user, source, host, ticket and a `run_id` shared by a whole fan-out.
+
+```toml
+[aliases]
+restart-api = "fleet apply @web --batch 1 --fail-fast -- containers restart api"
+
+[profiles.prod]
+env = { AISB_FLEET = "~/infra/prod.json" }
+
+[[policy.rules]]
+name = "prod destroy needs a ticket, in office hours"
+match = { tier = "destroy", hosts = "@prod" }
+require = { ticket = true }
+window = { days = ["mon", "tue", "wed", "thu", "fri"], hours = "09-17", tz = "Europe/Warsaw" }
+
+[[policy.rules]]
+name = "no privileged or :latest"
+match = { op = "containers.run" }
+deny_if = { privileged = true, image_tag = ["latest"] }
+```
+
+```bash
+aisb --profile prod fleet destroy @web --ticket OPS-42 -- containers rm old --yes
+aisb policy check --on web1 -- containers rm api --force     # explain a decision, run nothing
+aisb audit log --since 1d --action 'fleet.*' --failed -o table ; aisb audit verify
+aisb containers list -o csv --pick name,state,image          # also: ndjson, table, yaml, raw
+```
+
+**Runbooks.** TOML procedures whose steps are aisb commands (tiers, policy and audit apply), with `approve` gates,
+`retry`, `when = "on_failure"` cleanups, and persisted state you can resume.
+
+```bash
+aisb runbook plan rollout-api --var image=shop-api:1.5   # every step's per-host plan + approvals needed
+aisb runbook run rollout-api --yes                        # pauses at `approve` steps (exit 4, status waiting)
+aisb runbook pending ; aisb runbook approve RUN --note "canary ok" --resume   # or from the portal's Approvals tab
+```
+
+**Monitoring.** Samples go to a local sqlite history; trends forecast when disks fill; alerts go to webhook, Slack,
+ntfy or email sinks; `aisb exporter` serves Prometheus metrics.
+
+```bash
+aisb fleet status @prod --record --notify ops --fail-on failing    # cron-friendly: exit 4 on failing hosts
+aisb fleet trends @prod --since 7d ; aisb fleet report all --since 30d --slo 99.9
+aisb exporter --port 9469 --inventory ~/.aisb/fleet.json --record
+```
+
+**Desired state and migration.** Map selectors to stack files; `diff` shows drift, `converge` fixes it rolling.
+Compose files and existing inventories import directly.
+
+```bash
+aisb stack import docker-compose.yml --out stacks/shop.json
+aisb fleet diff desired.json all ; aisb fleet converge desired.json @web --batch 1 --fail-fast
+aisb fleet import ~/.ssh/config --match 'prod-*' --group prod ; aisb fleet import hosts.json --source aws --user ec2-user
+```
+
+**Supply chain, self-healing, canaries.**
+
+```bash
+aisb images vulns shop-api:1.5 --min-severity high      # OSV.dev lookup of the image's packages
+aisb images updates                                      # running images whose tag moved in the registry
+aisb net tls web --port 443 --server-name shop.example   # certificate expiry, chain, SANs
+aisb system remediate --dry-run                          # start-exited / restart-unhealthy / raise-memory plan
+aisb fleet canary @canary '@web,!@canary' --container api --http /healthz --port 8080   # go / no-go
+aisb fleet logs @web api --since 10m --patterns          # merged across hosts, fingerprinted
+```
+
+**Agents and UI.** The MCP server also exposes resources (`aisb://fleet/status`, `aisb://runbooks/pending`,
+`aisb://audit/recent`, `aisb://policy/rules`, `aisb://runbooks/{name}`) and prompts (`investigate-incident`, `rollout`,
+`daily-check`, one per runbook). The portal adds Fleet and Approvals tabs. **Plugins** (`aisb.plugins` entry points,
+`$AISB_PLUGINS`, `[plugins] modules`) add resources that get CLI, MCP, docs, policy and audit for free.
+
 ## Design
 
 ```text
@@ -168,10 +246,22 @@ state.py       $AISB_HOME (0700): sessions, blackbox records
 bundle.py      deterministic single-file .pyz of aisb (stdlib zipfile)
 fleet/         inventory + selectors, OpenSSH transport (exec, socket tunnels), vitals/health, fan-out
 contrib/       optional third-party integrations (pyinfra facts, operations, @aisb connector)
+context.py     who/where/why of a call (user, source, host, ticket, run_id), propagated into fleet workers
+config.py      config.toml: defaults, aliases, profiles, notify sinks, plugins, policy
+policy.py      rule matching and effects (deny, ticket, windows, deny_if) evaluated in invoke()
+audit.py       hash-chained JSONL audit log (flock, redaction, optional syslog)
+plugins.py     entry-point / env / config plugin loading
+render.py      output formats: json, ndjson, table, csv, yaml, raw; --pick projection
+runbooks.py    runbook parsing, rendering, persisted run state
+notify.py      alert sinks: webhook, slack, ntfy, email
+exporter.py    Prometheus exposition for the fleet or the local daemon
+yamlish.py     strict YAML subset parser; compose.py: compose -> stack translation
+supply.py      OSV client, registry digest lookup (token auth)
+fleet/         (+ metrics.py sqlite history and forecasts, desired.py, sources.py inventory importers)
 portal.py      stdlib web UI over the registry (token, Host allowlist, no destroy)
 stack.py       stack files: validation, naming, dependency order (graphlib), config hashes
 mcp.py         MCP server (stdio JSON-RPC) generated from the registry
-cli.py         argparse generated from the registry; JSON on stdout; exit codes 0/1/2/3/4
+cli.py         argparse generated from the registry; JSON on stdout; exit codes 0 ok, 1 docker, 2 usage, 3 confirm, 4 unmet, 5 policy
 ```
 
 Every operation carries a **tier**:
@@ -189,4 +279,6 @@ The Claude Code skill lives in `.claude/skills/docker/`. Its `references/command
 pip install pytest && pytest -q    # unit + CLI tests against a fake daemon on a unix socket
 pip install pyinfra                # enables tests/test_pyinfra.py (otherwise skipped)
 pytest -m docker                   # live round-trips; auto-skipped without a daemon
+ruff check src tests && mypy       # lint + types (config in pyproject.toml); CI runs both on 3.11-3.13
+aisb docs --site site/             # static per-resource command reference
 ```

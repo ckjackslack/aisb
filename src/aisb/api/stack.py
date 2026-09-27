@@ -133,3 +133,21 @@ class StackOps(Resource, name="stack"):
         return {"stack": name, "services": services,
                 "healthy": all(e["state"] == "running" and not e.get("drift") for e in services)}
 
+
+    @op(Tier.READ, name="import")
+    def import_(self, file: Annotated[str, "docker-compose.yml / compose.yaml"], *,
+                name: Annotated[str | None, "stack name (default: compose `name`, else the directory)"] = None,
+                out: Annotated[str | None, "write the stack JSON here (default: print it)"] = None) -> dict[str, Any]:
+        """Translate a compose file into an aisb stack file. Keys that can't be carried over are listed under
+        `unsupported`, and anything needing attention (build contexts, unset env) under `notes`."""
+        import json
+
+        from .. import compose
+        res = compose.load(file, name=name)
+        stk.parse(res["stack"])  # the result must be a valid stack (dependencies, names, readiness)
+        if out:
+            Path(out).expanduser().write_text(json.dumps(res["stack"], indent=2) + "\n")
+            return {"written": out, "services": sorted(res["stack"]["services"]), "notes": res["notes"],
+                    "unsupported": res["unsupported"], **{k: v for k, v in res.items() if k == "unsupported_top_level"},
+                    "next": [f"aisb stack up {out} --dry-run"]}
+        return res

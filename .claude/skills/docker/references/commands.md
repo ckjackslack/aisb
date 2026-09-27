@@ -109,6 +109,7 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | up | mutate | `aisb stack up FILE [--within WITHIN] [--no-wait] [--dry-run]` | Create network and volumes, then start services in dependency order, each gated on real readiness. |
 | down | destroy | `aisb stack down STACK [--service SERVICE]... [--volumes] [--dry-run] [--yes]` | Remove the stack's containers (and network; declared volumes only with --volumes). |
 | ps | read | `aisb stack ps STACK` | Services of a stack: state, health, ports, and drift against the file (when a file is given). |
+| import | read | `aisb stack import FILE [--name NAME] [--out OUT]` | Translate a compose file into an aisb stack file. Keys that can't be carried over are listed under |
 
 ## net
 
@@ -232,6 +233,7 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | add | mutate | `aisb fleet add NAME [--ssh SSH] [--port PORT] [--key KEY] [--docker DOCKER] [--group GROUP]... [--label LABEL]... [--ssh-option SSH_OPTION]... [--replace] [--inventory INVENTORY] [--dry-run]` | Add or update a machine. Nothing is contacted; run `fleet ping NAME` next. |
 | remove | mutate | `aisb fleet remove NAME [--inventory INVENTORY] [--dry-run]` | Remove a machine from the inventory (the machine itself is not touched). |
 | group | mutate | `aisb fleet group NAME [--add ADD] [--remove REMOVE] [--inventory INVENTORY] [--dry-run]` | Change group membership in bulk: `fleet group canary --add 'web*,&region=eu'`. |
+| import | mutate | `aisb fleet import FILE [--source SOURCE] [--match MATCH] [--group GROUP]... [--label LABEL]... [--user USER] [--public] [--replace] [--inventory INVENTORY] [--dry-run]` | Add hosts from an ssh_config (aliases keep their ssh settings), `aws ec2 describe-instances` JSON |
 | export | read | `aisb fleet export [TARGET] [--format FORMAT] [--inventory INVENTORY]` | The inventory for other tools: a pyinfra inventory.py (groups kept), an ssh_config, or JSON. |
 | ping | read | `aisb fleet ping [TARGET] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--inventory INVENTORY]` | Can each host be reached (SSH, then Docker)? Round-trip time and Docker version per host. |
 | status | read | `aisb fleet status [TARGET] [--no-doctor] [--tail TAIL] [--fail-on FAIL_ON] [--record] [--notify NOTIFY]... [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--inventory INVENTORY]` | Which machines need attention and why: vitals (load, memory, disk) + container verdicts, worst first. |
@@ -241,6 +243,9 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | ps | read | `aisb fleet ps [TARGET] [--all] [--name NAME] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--inventory INVENTORY]` | Containers across machines in one table (host column). |
 | doctor | read | `aisb fleet doctor [TARGET] [--tail TAIL] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--inventory INVENTORY]` | Container problems across machines, worst first, with the host each one is on. |
 | ship | mutate | `aisb fleet ship IMAGE TARGET [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--batch BATCH] [--fail-fast] [--inventory INVENTORY] [--dry-run]` | Copy an image from this machine to the selected hosts (no registry needed; air-gapped friendly). |
+| diff | read | `aisb fleet diff STATE [TARGET] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--inventory INVENTORY]` | Desired vs actual: per host and stack, which services are missing, stopped, drifted or ok, plus stacks |
+| converge | mutate | `aisb fleet converge STATE [TARGET] [--within WITHIN] [--parallel PARALLEL] [--batch BATCH] [--fail-fast] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--inventory INVENTORY] [--dry-run]` | Bring hosts to the desired state: create missing services and start stopped ones (`stack up`, gated on |
+| replace-drifted | destroy | `aisb fleet replace-drifted STATE [TARGET] [--within WITHIN] [--parallel PARALLEL] [--batch BATCH] [--fail-fast] [--host-timeout HOST_TIMEOUT] [--inventory INVENTORY] [--dry-run] [--yes]` | Recreate services whose config drifted from their stack file (`stack down --service`, then `stack up`; |
 | query | read | `aisb fleet query TARGET [-- COMMAND...] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--batch BATCH] [--fail-fast] [--flat] [--inventory INVENTORY]` | Run a read op on every selected host: `fleet query @prod -- containers logs api --tail 50`. |
 | apply | mutate | `aisb fleet apply TARGET [-- COMMAND...] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--batch BATCH] [--fail-fast] [--inventory INVENTORY] [--dry-run]` | Run a mutate op on every selected host; `--dry-run` returns each host's planned API calls. |
 | destroy | destroy | `aisb fleet destroy TARGET [-- COMMAND...] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--batch BATCH] [--fail-fast] [--inventory INVENTORY] [--dry-run] [--yes]` | Run a destroy op on every selected host. Without --yes: each host's plan, exit 3, nothing changed. |

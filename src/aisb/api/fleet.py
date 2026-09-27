@@ -122,6 +122,36 @@ class Fleet(Resource, name="fleet"):
         else:
             inv.save()
 
+    @op(Tier.MUTATE, name="import")
+    def import_(self, file: Annotated[str, "source file (use ~/.ssh/config for ssh-config)"], *,
+                source: Annotated[Literal["ssh-config", "aws", "csv", "json"], "file format"] = "ssh-config",
+                match: Annotated[str | None, "only host names matching this glob"] = None,
+                group: Annotated[list[str] | None, "also put imported hosts in this group (repeatable)"] = None,
+                label: Annotated[dict[str, str] | None, "also set KEY=VALUE labels (repeatable)"] = None,
+                user: Annotated[str, "aws: ssh user for the instances"] = "ec2-user",
+                public: Annotated[bool, "aws: use public IPs instead of private ones"] = False,
+                replace: Annotated[bool, "replace existing entries instead of merging"] = False,
+                inventory: Inv = None) -> dict[str, Any]:
+        """Add hosts from an ssh_config (aliases keep their ssh settings), `aws ec2 describe-instances` JSON
+        (Name tag, IPs, tags as labels, Role tag as group), CSV or JSON. Existing entries are merged unless --replace."""
+        from dataclasses import replace as dc_replace
+        from pathlib import Path
+
+        from ..fleet import sources
+        text = Path(file).expanduser().read_text()
+        parser = sources.PARSERS[source]
+        found = parser(text, user=user, public=public) if source == "aws" else parser(text)
+        found = sources.select(found, match)
+        inv = Inventory.load(inventory)
+        added, updated = [], []
+        for h in found:
+            h = dc_replace(h, groups=tuple(dict.fromkeys((*h.groups, *(group or ())))), labels={**h.labels, **kv(label)})
+            (updated if h.name in inv.hosts else added).append(h.name)
+            inv.upsert(h, merge=not replace)
+        self._save(inv, action="import", source=source, added=added, updated=updated)
+        return {"source": source, "added": added, "updated": updated, "inventory": str(inv.path),
+                "next": ["aisb fleet ping " + ",".join(added[:10])] if added else []}
+
     @op(Tier.READ)
     def export(self, target: Target = "all", *,
                format: Annotated[Literal["pyinfra", "ssh-config", "json"], "output format"] = "pyinfra",
@@ -361,6 +391,121 @@ class Fleet(Resource, name="fleet"):
             out = self._fan(hosts, one, None, parallel=parallel, batch=batch, fail_fast=fail_fast, retries=retries,
                             host_timeout=host_timeout)
         return {"image": image, "tags": tags, "bytes": size, **out}
+
+    # --- desired state ------------------------------------------------------------------------------
+
+    def _stack_rows(self, d: Any) -> list[dict[str, Any]]:
+        from ..stack import STACK_KEY
+        return d.transport.json("GET", "/containers/json", query={"all": True, "filters": {"label": [STACK_KEY]}}) or []
+
+    def _desired(self, state: str, target: str, inventory: str | None) -> tuple[dict[str, Any], list[Host]]:
+        from ..fleet import desired
+        inv = Inventory.load(inventory)
+        want = desired.load(state, inv)
+        hosts = [h for h in inv.select(target) if h.name in want]
+        if not hosts:
+            raise ValueError(f"no host in {target!r} has stacks assigned in {state}")
+        return want, hosts
+
+    @op(Tier.READ)
+    def diff(self, state: Annotated[str, "desired-state file: {\"assign\": {SELECTOR: [stack files]}}"],
+             target: Target = "all", *, parallel: Parallel = 16, retries: Retries = 0,
+             host_timeout: HostTimeout = None, inventory: Inv = None) -> dict[str, Any]:
+        """Desired vs actual: per host and stack, which services are missing, stopped, drifted or ok, plus stacks
+        running on a host that the state file doesn't assign there."""
+        from ..stack import STACK_KEY, plan
+        want, hosts = self._desired(state, target, inventory)
+
+        def one(h: Host) -> dict[str, Any]:
+            with runner.docker(h) as d:
+                rows = self._stack_rows(d)
+            mine = {a.stack.name for a in want[h.name]}
+            stacks = {a.stack.name: plan(a.stack, [r for r in rows if (r.get("Labels") or {}).get(STACK_KEY) == a.stack.name])
+                      for a in want[h.name]}
+            extra = sorted({(r.get("Labels") or {}).get(STACK_KEY) for r in rows} - mine - {None})
+            converged = all(not (p["missing"] or p["stopped"] or p["drift"]) for p in stacks.values())
+            return {"converged": converged, "stacks": stacks, **({"unassigned_stacks": extra} if extra else {})}
+        out = self._fan(hosts, one, None, parallel=parallel, retries=retries, host_timeout=host_timeout)
+        results = [r for r in out["results"] if r["ok"]]
+        out["converged"] = sorted(r["host"] for r in results if r["result"]["converged"])
+        out["needs_converge"] = sorted(r["host"] for r in results if not r["result"]["converged"])
+        return out
+
+    def _stack_op(self, d: Any, name: str, kwargs: dict[str, Any], planning: bool) -> Any:
+        from ..ops import get_op
+        o = get_op(name)
+        if planning:
+            return {"planned": invoke(d, o, kwargs, dry_run=True).planned}
+        return _plain(invoke(d, o, kwargs, confirm=True).result)
+
+    @op(Tier.MUTATE)
+    def converge(self, state: Annotated[str, "desired-state file"], target: Target = "all", *,
+                 within: Annotated[float, "readiness timeout per service"] = 120.0,
+                 parallel: Parallel = 8, batch: Batch = None, fail_fast: FailFast = False, retries: Retries = 0,
+                 host_timeout: HostTimeout = None, inventory: Inv = None) -> dict[str, Any]:
+        """Bring hosts to the desired state: create missing services and start stopped ones (`stack up`, gated on
+        readiness). Drifted services are reported, not replaced (see `fleet replace-drifted`). Rolling with --batch."""
+        from ..stack import STACK_KEY, plan
+        want, hosts = self._desired(state, target, inventory)
+        planning = self.t.planning
+
+        def one(h: Host) -> dict[str, Any]:
+            done: dict[str, Any] = {}
+            with runner.docker(h) as d:
+                rows = self._stack_rows(d)
+                for a in want[h.name]:
+                    p = plan(a.stack, [r for r in rows if (r.get("Labels") or {}).get(STACK_KEY) == a.stack.name])
+                    entry: dict[str, Any] = {"drift": p["drift"]} if p["drift"] else {}
+                    if p["missing"] or p["stopped"]:
+                        res = self._stack_op(d, "stack.up", {"file": str(a.file), "within": within}, planning)
+                        entry["up"] = res
+                        if isinstance(res, dict) and res.get("ok") is False:
+                            done[a.stack.name] = entry
+                            return {"ok": False, "reason": f"{a.stack.name}: {res.get('reason')}", "stacks": done}
+                    else:
+                        entry["action"] = "converged"
+                    done[a.stack.name] = entry
+            return {"stacks": done}
+        out = self._fan(hosts, one, None, parallel=parallel, batch=batch, fail_fast=fail_fast, retries=retries,
+                        host_timeout=host_timeout)
+        if planning:
+            for r in out["results"]:
+                self.t.note(host=r["host"], **(r["result"] if r["ok"] else {"error": r["error"]}))
+        return out
+
+    @op(Tier.DESTROY, name="replace-drifted")
+    def replace_drifted(self, state: Annotated[str, "desired-state file"], target: Target = "all", *,
+                        within: Annotated[float, "readiness timeout per service"] = 120.0,
+                        parallel: Parallel = 4, batch: Batch = None, fail_fast: FailFast = False,
+                        host_timeout: HostTimeout = None, inventory: Inv = None) -> dict[str, Any]:
+        """Recreate services whose config drifted from their stack file (`stack down --service`, then `stack up`;
+        volumes are kept). Destroy tier: per-host plan and exit 3 until --yes. Prefer --batch 1 --fail-fast."""
+        from ..stack import STACK_KEY, plan
+        want, hosts = self._desired(state, target, inventory)
+        planning = self.t.planning
+
+        def one(h: Host) -> dict[str, Any]:
+            done: dict[str, Any] = {}
+            with runner.docker(h) as d:
+                rows = self._stack_rows(d)
+                for a in want[h.name]:
+                    p = plan(a.stack, [r for r in rows if (r.get("Labels") or {}).get(STACK_KEY) == a.stack.name])
+                    if not p["drift"]:
+                        continue
+                    down = self._stack_op(d, "stack.down", {"stack": a.stack.name, "service": p["drift"]}, planning)
+                    # in a plan the drifted containers still exist, so `stack up` can't show their re-creation
+                    up = {"recreates": p["drift"], "from": str(a.file)} if planning else \
+                        self._stack_op(d, "stack.up", {"file": str(a.file), "within": within}, planning)
+                    done[a.stack.name] = {"replaced": p["drift"], "down": down, "up": up}
+                    if isinstance(up, dict) and up.get("ok") is False:
+                        return {"ok": False, "reason": f"{a.stack.name}: {up.get('reason')}", "stacks": done}
+            return {"stacks": done or "no drift"}
+        out = self._fan(hosts, one, None, parallel=parallel, batch=batch, fail_fast=fail_fast,
+                        host_timeout=host_timeout)
+        if planning:
+            for r in out["results"]:
+                self.t.note(host=r["host"], **(r["result"] if r["ok"] else {"error": r["error"]}))
+        return out
 
     # --- run anything, tier-preserving ------------------------------------------------------------
 

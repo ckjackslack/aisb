@@ -42,20 +42,7 @@ def install(path: str = PYZ):
     yield from files.put._inner(src=io.BytesIO(_bundle()), dest=path, mode="755")
 
 
-def _plan(s: stk.Stack, rows: list[dict[str, Any]] | None) -> dict[str, list[str]]:
-    by_service = {(r.get("labels") or {}).get(stk.SERVICE_KEY): r for r in rows or []}
-    plan: dict[str, list[str]] = {"missing": [], "stopped": [], "drift": [], "ok": []}
-    for name in s.order:
-        r = by_service.get(name)
-        if r is None:
-            plan["missing"].append(name)
-        elif (r.get("labels") or {}).get(stk.HASH_KEY) != s.services[name].digest:
-            plan["drift"].append(name)
-        elif r.get("state") != "running":
-            plan["stopped"].append(name)
-        else:
-            plan["ok"].append(name)
-    return plan
+_plan = stk.plan  # shared with `fleet diff/converge`
 
 
 @operation()

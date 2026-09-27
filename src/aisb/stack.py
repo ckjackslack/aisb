@@ -104,3 +104,23 @@ def load(path: str | Path) -> Stack:
         return parse(json.loads(Path(path).expanduser().read_text()))
     except json.JSONDecodeError as e:
         raise ValueError(f"{path}: invalid JSON: {e}") from None
+
+
+def plan(s: Stack, rows: list[dict[str, Any]] | None) -> dict[str, list[str]]:
+    """Classify each service of `s` against existing containers (raw API rows or `containers list` rows):
+    missing, stopped, drift (config hash differs) or ok. `rows=None` means nothing is known: all missing."""
+    def labels(r: dict[str, Any]) -> dict[str, str]:
+        return r.get("Labels") or r.get("labels") or {}
+    by_service = {labels(r).get(SERVICE_KEY): r for r in rows or [] if labels(r).get(STACK_KEY) in (None, s.name)}
+    out: dict[str, list[str]] = {"missing": [], "stopped": [], "drift": [], "ok": []}
+    for name in s.order:
+        r = by_service.get(name)
+        if r is None:
+            out["missing"].append(name)
+        elif labels(r).get(HASH_KEY) != s.services[name].digest:
+            out["drift"].append(name)
+        elif (r.get("State") or r.get("state")) != "running":
+            out["stopped"].append(name)
+        else:
+            out["ok"].append(name)
+    return out

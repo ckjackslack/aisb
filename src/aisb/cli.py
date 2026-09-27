@@ -21,7 +21,7 @@ EXIT_OK, EXIT_DOCKER, EXIT_USAGE, EXIT_CONFIRM, EXIT_UNMET, EXIT_POLICY = 0, 1, 
 
 
 def _add_param(p: argparse.ArgumentParser, prm: Param) -> None:
-    kw: dict[str, Any] = {"help": prm.help or None}
+    kw: dict[str, Any] = {"help": prm.help.replace("%", "%%") or None}  # argparse %-formats help strings
     if prm.variadic:
         p.add_argument(prm.name, nargs="*", type=prm.type, metavar=prm.name.upper(), **kw)
     elif prm.positional:
@@ -66,7 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
         rp = resources.add_parser(rname, help=f"{rname} operations")
         sub = rp.add_subparsers(dest="op", required=True, metavar="OP")
         for o in ops.values():
-            p = sub.add_parser(o.name, parents=[common], help=f"[{o.tier}] {o.summary}", description=o.doc)
+            p = sub.add_parser(o.name, parents=[common], help=f"[{o.tier}] {o.summary}".replace("%", "%%"),
+                                description=o.doc)
             if o.tier is not Tier.READ:
                 p.add_argument("--dry-run", action="store_true", help="print the planned API requests, change nothing")
             if o.tier is Tier.DESTROY:

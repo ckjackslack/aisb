@@ -430,7 +430,7 @@ def test_mongo_ops(cli, daemon):
     assert cli("mongo", "collections", "mdb", "--database", "shop")[1] == [{"name": "u", "type": "collection", "count": 1}]
     assert eng.calls[0][1]["AISB_DB"] == "shop"
     code, out, _ = cli("mongo", "find", "mdb", "users", "--format", "csv")
-    assert out == {"count": 2, "output": "_id,a,b\n1,x,\n2,,True\n"}
+    assert out == {"count": 2, "output": "_id,a,b\n1,x,\n2,,true\n"}
     assert cli("mongo", "eval", "mdb", "return 3")[1] == {"result": 3}
     assert "return 3" in eng.calls[2][0][-1]
 

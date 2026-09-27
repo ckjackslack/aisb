@@ -31,6 +31,7 @@ class Column:
     scale: int | None = None
     choices: tuple[str, ...] = ()
     minimum: float | None = None
+    maximum: float | None = None
 
 
 @dataclass(slots=True)
@@ -56,7 +57,9 @@ def normalize(data_type: str, udt: str = "") -> str:
 _Q = r"'(?:[^']|'')*'"  # a quoted literal, which may itself contain ] ) , or ''
 _ANY_ARRAY = re.compile(r"\(?\(?(\w+)\)?(?:::\w+)? = ANY \(\(?ARRAY\[((?:" + _Q + r"|[^\]'])*)\]")
 _IN_LIST = re.compile(r"`?(\w+)`?\s+in\s*\(((?:" + _Q + r"|[^)'])*)\)", re.I)
-_MIN = re.compile(r"\(?`?(\w+)`?\s*(>=|>)\s*\(?'?(-?\d+(?:\.\d+)?)")
+_NUM = r"\(?'?(-?\d+(?:\.\d+)?)'?\)?"
+_BOUND = re.compile(r"\(?`?(\w+)`?\s*(>=|>|<=|<)\s*" + _NUM)
+_BETWEEN = re.compile(r"`?(\w+)`?\s+between\s+" + _NUM + r"\s+and\s+" + _NUM, re.I)
 
 
 def _quoted(text: str) -> tuple[str, ...]:
@@ -65,13 +68,27 @@ def _quoted(text: str) -> tuple[str, ...]:
 
 
 def apply_check(meta: TableMeta, clause: str) -> None:
-    """Understand the common CHECK shapes: `col IN (...)` / `col = ANY (ARRAY[...])` and `col >= n`."""
+    """Understand the common CHECK shapes: `col IN (...)` / `col = ANY (ARRAY[...])`, and numeric bounds:
+    `col >= n`, `col < n` (any combination, e.g. `qty > 0 AND qty <= 100`) and `col BETWEEN a AND b`.
+    Exclusive bounds move by 1, which is conservative for numeric and float columns too."""
     for rx in (_ANY_ARRAY, _IN_LIST):
         if (m := rx.search(clause)) and m.group(1) in meta.columns:
             meta.columns[m.group(1)].choices = _quoted(m.group(2))
             return
-    if (m := _MIN.search(clause)) and m.group(1) in meta.columns:
-        meta.columns[m.group(1)].minimum = float(m.group(3)) + (1 if m.group(2) == ">" else 0)
+    for name, lo, hi in ((m[1], m[2], m[3]) for m in _BETWEEN.finditer(clause)):
+        if col := meta.columns.get(name):
+            col.minimum, col.maximum = _tighter(col.minimum, float(lo), max), _tighter(col.maximum, float(hi), min)
+    for name, op, value in ((m[1], m[2], float(m[3])) for m in _BOUND.finditer(clause)):
+        if (col := meta.columns.get(name)) is None:
+            continue
+        if op.startswith(">"):
+            col.minimum = _tighter(col.minimum, value + (1 if op == ">" else 0), max)
+        else:
+            col.maximum = _tighter(col.maximum, value - (1 if op == "<" else 0), min)
+
+
+def _tighter(current: float | None, new: float, pick: Any) -> float:
+    return new if current is None else float(pick(current, new))
 
 
 def introspect(db: SQL, database: str | None = None) -> dict[str, TableMeta]:
@@ -196,17 +213,23 @@ class Generator:
             lo = int(col.minimum) if col.minimum is not None else (1 if any(k in name for k in ("qty", "quantity", "count", "age")) else 0)
             hi = 120 if "age" in name else 10 if ("qty" in name or "quantity" in name) else \
                 32767 if t == "smallint" else 100000
+            if col.maximum is not None:
+                hi = min(hi, int(col.maximum)) if col.maximum >= lo else int(col.maximum)
             return lo + i if unique else r.randint(lo, max(lo, hi))
         if t == "numeric":
             scale = col.scale if col.scale is not None else 2
             top = 10 ** ((col.precision or 10) - scale) - 1
             low = float(col.minimum) if col.minimum is not None else 0.0
             high = float(min(top, 999 if any(k in name for k in ("price", "amount", "total", "cost", "fee")) else top))
+            high = min(high, col.maximum) if col.maximum is not None else high
             num = Decimal(str(round(r.uniform(low, max(low, high)), scale)))
             return str(num.quantize(Decimal(1).scaleb(-scale)))
         if t == "float":
-            return round(r.uniform(-90, 90), 6) if "lat" in name else round(r.uniform(-180, 180), 6) if "lng" in name \
-                or "lon" in name else round(r.uniform(0, 1000), 3)
+            lo_f, hi_f = (-90.0, 90.0) if "lat" in name else (-180.0, 180.0) if "lng" in name or "lon" in name \
+                else (0.0, 1000.0)
+            lo_f = max(lo_f, col.minimum) if col.minimum is not None else lo_f
+            hi_f = min(hi_f, col.maximum) if col.maximum is not None else hi_f
+            return round(r.uniform(lo_f, max(lo_f, hi_f)), 6)
         if t == "bool":
             return r.random() < 0.5
         if t in ("date", "timestamp"):

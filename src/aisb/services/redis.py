@@ -64,8 +64,8 @@ def parse_info(text: str) -> dict[str, dict[str, Any]]:
             key, _, value = line.partition(":")
             if "=" in value and "," in value or key.startswith("db"):
                 section[key] = {k: _num(v) for k, _, v in (p.partition("=") for p in value.split(","))}
-            else:
-                section[key] = _num(value)
+            else:  # versions stay text: "7.2" is not the number 7.2, and "7.2.10" would not be one at all
+                section[key] = value if key.endswith("version") else _num(value)
     return {k: v for k, v in out.items() if v}
 
 

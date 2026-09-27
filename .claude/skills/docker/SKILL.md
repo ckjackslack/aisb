@@ -56,7 +56,7 @@ Before a session that will create or change things, take a snapshot so you can r
 |---|---|---|
 | What runs where, and how to connect | `svc list`, `svc url NAME` | Host URLs with secrets masked. `--reveal` prints the password, so use it only if the user asks. A `note` explains unpublished ports. |
 | Wait until it *really* works | `svc ready NAME --within 120` | Real probe (`SELECT 1`, `PING`, TCP) plus the init-phase check. Use this before the first query on a new DB, **not** `containers wait --log`. |
-| Read data | `db query NAME "SELECT ..."` | **Runs in a read-only session** (psql meta-commands and mysql client commands are refused). This guards against accidents, not a determined caller: SQL can reset the session, so give untrusted agents a read-only database role. Decimals stay exact strings, integers become numbers, NULL stays null. `--limit` defaults to 1000. |
+| Read data | `db query NAME "SELECT ..."` | Read-only. `access` in the result says what enforces it: `role aisb_ro` (a least-privilege role from `db grant-readonly`: the server refuses writes) or `read-only session` (a guard only: SQL can reset a session). psql meta-commands and mysql client commands are always refused. Decimals stay exact strings, integers become numbers, NULL stays null. `--limit` defaults to 1000. |
 | Change data or schema | `db exec NAME "UPDATE ..."`, `db exec NAME --file m.sql` | Mutate tier: preview with `--dry-run`, which redacts secrets. Returns `affected`. |
 | Explore schema | `db tables NAME`, `db describe NAME TABLE` | Postgres, MySQL/MariaDB, SQLite (`--path /file.db` inside the container; no sqlite3 needed there). |
 | Backup / restore | `db dump NAME out.sql.gz`; `db restore NAME f.sql.gz` | Dump streams gzipped to the host. **Restore is destroy tier.** |
@@ -93,7 +93,7 @@ Rules: prefer `db query` over `db exec` for anything read-only. Put `LIMIT` in e
 | **Undo** a risky sequence | `session begin` … work … `session rollback` | Journals an inverse *before* each change: removed containers are recreated (with their secrets), volumes and DBs restored from automatic backups, run states reset, stray objects removed. `rollback` is destroy tier and idempotent; prune/rmi are reported as not undoable. Start one before any multi-step cleanup or migration. |
 | Outage across services | `system incident --since 15m [--format markdown]` | Root cause = the failing container none of whose dependencies failed earlier (observed traffic + env URLs); blast radius, chain, postmortem. `evidence` says whether causality came from traffic, config or timing only. |
 | Crashes you keep missing | `system blackbox --seconds 600`, later `system forensics NAME` | Ring-buffers logs from creation, so even `--rm` containers leave a record (env redacted). |
-| Hand a bug to someone else | `capsule create NAME out.tar.gz [--db-sample 0.05] [--volumes] [--image]`; `capsule load f --env SECRET=...` | Secrets are redacted and must be resupplied; volumes load into fresh volumes. |
+| Hand a bug to someone else | `capsule create NAME out.tar.gz [--db-sample 0.05] [--volumes] [--image]`; `capsule load f --env SECRET=...` | Secrets in env, command-line args, entrypoint, health check and labels are redacted (`redacted_env`, `redacted`) and resupplied by name, e.g. `--env arg:--requirepass=...`; load refuses until command secrets are given. Volumes load into fresh volumes. |
 | Who really talks to whom | `net graph [--stack s.json] [--format mermaid]` | From socket tables; `--stack` flags undeclared and unused dependencies. |
 | "Works on my machine" env bugs | `containers envcheck NAME`, `images envcheck IMG --env-file .env` | Missing required vars, typos (`did_you_mean`), unused provided vars. Works on created, not-yet-started containers. |
 | What's in / what changed in an image | `images sbom IMG [--format cyclonedx]`, `images diff A B` | apk/dpkg/rpm/pypi/npm/gem; file and package up/downgrades plus config diff. |
@@ -148,6 +148,7 @@ Rules:
 - Gate rollouts with `fleet canary` or `fleet status --fail-on degraded`, and stop at the first no-go.
 - `system remediate` and `fleet converge` are mutate: `--dry-run` first unless the user asked for the change.
 - `images vulns` needs egress to api.osv.dev; on a 403/timeout say so rather than reporting "no vulnerabilities".
+- Before you run SQL on a database the user cares about, check `access` in the `db query` result. If it says `read-only session`, tell the user that `aisb db grant-readonly NAME` (mutate; ask first) makes read-only server-enforced.
 
 ## Remote hosts and pyinfra
 

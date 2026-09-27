@@ -485,3 +485,39 @@ def test_seed_zero_rows_reports_no_sample(pg):
     report = seed.seed(db, REL, shop_metas(), rows=0, tables=["customers"], seed_value=1)
     assert report == {"tables": {"customers": 0}, "sample": {}}
     assert not any(s.startswith("INSERT") for s in eng.sql())
+
+
+@pytest.mark.parametrize(("clause", "col", "lo", "hi"), [
+    ("CHECK (((qty > 0) AND (qty <= 100)))", "qty", 1.0, 100.0),          # postgres normalises to this shape
+    ("CHECK ((score < 10))", "score", None, 9.0),
+    ("(`qty` between 5 and 50)", "qty", 5.0, 50.0),                        # mysql keeps BETWEEN
+    ("CHECK ((price >= (1.5)::numeric) AND (price < (99)::numeric))", "price", 1.5, 98.0),
+    ("CHECK ((lat >= -90) AND (lat <= 0))", "lat", -90.0, 0.0),
+])
+def test_check_bounds(clause, col, lo, hi):
+    meta = seed.TableMeta({col: seed.Column(col, "int", False, False)})
+    seed.apply_check(meta, clause)
+    assert (meta.columns[col].minimum, meta.columns[col].maximum) == (lo, hi)
+
+
+def test_bounds_combine_to_the_tightest():
+    meta = seed.TableMeta({"n": seed.Column("n", "int", False, False)})
+    seed.apply_check(meta, "CHECK ((n >= 0) AND (n <= 1000))")
+    seed.apply_check(meta, "CHECK ((n >= 10) AND (n < 20))")
+    assert (meta.columns["n"].minimum, meta.columns["n"].maximum) == (10.0, 19.0)
+
+
+@pytest.mark.parametrize(("ctype", "check"), [
+    ("int", "qty BETWEEN 3 AND 7"), ("numeric", "price > 0 AND price < 5"), ("float", "ratio >= 0.25 AND ratio <= 0.5"),
+])
+def test_generated_values_satisfy_upper_bounds_on_a_real_engine(ctype, check):
+    col = check.split()[0]
+    sqltype = {"int": "INTEGER", "numeric": "NUMERIC(8,2)", "float": "REAL"}[ctype]
+    conn = sqlite3.connect(":memory:")
+    conn.execute(f"CREATE TABLE t ({col} {sqltype} NOT NULL CHECK ({check}))")
+    meta = seed.TableMeta({col: seed.Column(col, ctype, False, False, precision=8, scale=2)})
+    seed.apply_check(meta, f"CHECK ({check})")
+    g = seed.Generator(7)
+    for i in range(200):
+        conn.execute("INSERT INTO t VALUES (?)", (g.value(meta.columns[col], i, False),))  # CHECK enforced by sqlite
+    assert conn.execute("SELECT count(*) FROM t").fetchone() == (200,)

@@ -32,6 +32,8 @@ def infer(columns: Sequence[str], rows: list[list[Any]]) -> list[list[Any]]:
 def _cell(v: Any) -> str:
     if v is None:
         return "NULL"
+    if isinstance(v, bool):
+        return "true" if v else "false"  # like the JSON output, not Python's True/False
     if isinstance(v, (dict, list)):
         return json.dumps(v, ensure_ascii=False)
     return str(v).replace("\n", "\\n").replace("\t", "\\t")
@@ -42,7 +44,7 @@ def render(columns: Sequence[str], rows: Sequence[Sequence[Any]], fmt: Format) -
         buf = io.StringIO()
         w = csv.writer(buf, lineterminator="\n")
         w.writerow(columns)
-        w.writerows(["" if v is None else _cell(v) if isinstance(v, (dict, list)) else v for v in r] for r in rows)
+        w.writerows(["" if v is None else _cell(v) if isinstance(v, (dict, list, bool)) else v for v in r] for r in rows)
         return buf.getvalue()
     cells = [[_cell(v) for v in r] for r in rows]
     widths = [max([len(c), *(len(r[i]) for r in cells if i < len(r))]) for i, c in enumerate(columns)]

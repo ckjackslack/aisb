@@ -194,3 +194,21 @@ def test_steps_cannot_nest_runbooks(cli, tmp_path):
     """)
     code, _, err = cli("runbook", "plan", f)
     assert code != EXIT_OK and "another runbook" in err
+
+
+def test_failure_reason_is_the_step_that_stopped_the_run_not_a_tolerated_one(cli, daemon, tmp_path):
+    daemon.on("POST", "/containers/cache/restart", status=500, json={"message": "cache flaky"})
+    daemon.on("POST", "/containers/db/restart", status=500, json={"message": "db down"})
+    f = book(tmp_path, """
+        [[steps]]
+        name = "cache"
+        run = "containers restart cache"
+        continue_on_error = true
+        [[steps]]
+        name = "db"
+        run = "containers restart db"
+    """)
+    code, out, _ = cli("runbook", "run", f, "--yes")
+    assert code == EXIT_UNMET and out["reason"] == "step 'db' failed: APIError: db down"
+    assert out["steps"][0] == {**out["steps"][0], "status": "failed", "tolerated": True}
+    assert "tolerated" not in out["steps"][1]

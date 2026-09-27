@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Annotated, Any
 
+from .. import redact
 from ..errors import DockerError, NotFound
 from ..models import RunSpec
 from ..ops import Resource, Tier, op
@@ -57,6 +58,12 @@ class Capsule(Resource, name="capsule"):
         redacted = sorted(k for k, _, v in (e.partition("=") for e in spec.get("env", [])) if SECRET_KEY.search(k) and v)
         spec["env"] = [f"{k}={REDACTED}" if k in redacted else f"{k}={v}" for k, _, v in
                        (e.partition("=") for e in spec.get("env", []))]
+        # beyond env: secrets passed as arguments (--requirepass x), in the entrypoint or health check, in labels
+        spec["cmd"], names = redact.args(spec.get("cmd") or [])
+        spec["entrypoint"], ep_names = redact.shell(spec.get("entrypoint"), prefix="entrypoint")
+        spec["health_cmd"], hc_names = redact.shell(spec.get("health_cmd"), prefix="health")
+        spec["labels"], label_names = redact.labels(spec.get("labels") or {})
+        redacted_other = sorted({*names, *ep_names, *hc_names, *label_names})
         try:
             img = self.t.json("GET", f"/images/{q(info.get('Image', ''))}/json") or {}
         except NotFound:
@@ -66,10 +73,18 @@ class Capsule(Resource, name="capsule"):
             "aisb_capsule": VERSION, "created": int(time.time()), "container": name,
             "docker": (self.t.json("GET", "/version") or {}).get("Version"),
             "image": {"ref": cfg.get("Image"), "id": info.get("Image"), "repo_digests": img.get("RepoDigests") or []},
-            "redacted_env": redacted, "mounts": [], "db": None, "embedded_image": image,
+            "redacted_env": redacted, "redacted": redacted_other, "mounts": [], "db": None, "embedded_image": image,
         }
         path = Path(out).expanduser()
-        safe_inspect = {**info, "Config": {**cfg, "Env": redact_env(cfg.get("Env") or [])}}
+        health = dict(cfg.get("Healthcheck") or {})
+        if health.get("Test"):
+            health["Test"] = redact.healthcheck(health["Test"])[0]
+        safe_inspect = {**info, "Args": redact.args(info.get("Args") or [])[0],
+                        "Config": {**cfg, "Env": redact_env(cfg.get("Env") or []),
+                                   "Cmd": redact.args(cfg.get("Cmd") or [])[0],
+                                   "Entrypoint": redact.args(cfg.get("Entrypoint") or [], prefix="entrypoint")[0],
+                                   "Labels": redact.labels(cfg.get("Labels") or {})[0],
+                                   **({"Healthcheck": health} if health else {})}}
         with tarfile.open(path, "w:gz") as tar:
             _add(tar, "spec.json", json.dumps(spec, indent=1).encode())
             _add(tar, "inspect.json", json.dumps(safe_inspect, indent=1, default=str).encode())
@@ -104,6 +119,7 @@ class Capsule(Resource, name="capsule"):
                     tar, "image.tar", self.t.stream("GET", f"/images/{q(info['Image'])}/get", timeout=None))
             _add(tar, "manifest.json", json.dumps(manifest, indent=1).encode())
         return {"capsule": str(path), "bytes": path.stat().st_size, "container": name, "redacted_env": redacted,
+                "redacted": redacted_other,
                 "mounts": len(manifest["mounts"]), "db": manifest["db"], "embedded_image": image}
 
     @op(Tier.MUTATE)
@@ -125,12 +141,21 @@ class Capsule(Resource, name="capsule"):
             if absent := [f"volumes/{m['index']}.tar" for m in manifest.get("mounts", [])
                           if f"volumes/{m['index']}.tar" not in members]:  # before any change: no half-restored copy
                 raise ValueError(f"{file} is incomplete: missing {', '.join(absent)}")
+            supplied = kv(env)
+            # argument / entrypoint / health secrets are structural: refuse rather than run with a placeholder
+            spec_d["cmd"], cmd_missing = self._fill_list(spec_d.get("cmd") or [], supplied)
+            for key in ("entrypoint", "health_cmd"):
+                if spec_d.get(key):
+                    spec_d[key], gone = redact.fill(spec_d[key], supplied)
+                    cmd_missing += gone
+            if cmd_missing:
+                raise ValueError(f"{file}: the command needs redacted secrets; supply them with "
+                                 + " ".join(f"--env {n}=..." for n in sorted(set(cmd_missing))))
             if "image.tar" in members:
                 self.t.json("POST", "/images/load", data=read("image.tar"), content_type="application/x-tar",
                             timeout=None)
             image_ref = self._ensure_image(manifest["image"])
             new = name or f"{manifest['container']}-capsule"
-            supplied = kv(env)
             envs, missing = [], []
             for k, _, v in (e.partition("=") for e in spec_d.get("env", [])):
                 if v == REDACTED:
@@ -140,12 +165,19 @@ class Capsule(Resource, name="capsule"):
                         missing.append(k)
                 else:
                     envs.append(f"{k}={supplied.get(k, v)}")
+            labels: dict[str, str] = {}
+            for k, v in (spec_d.get("labels") or {}).items():  # a label whose secret isn't supplied is left out
+                value, gone = redact.fill(v, supplied)
+                if gone:
+                    missing += gone
+                else:
+                    labels[k] = value
             ports = spec_d.get("ports", []) if keep_ports else [p.rsplit(":", 1)[-1] for p in spec_d.get("ports", [])]
             # Never write capsule data into a same-named volume that already exists here: use fresh ones.
             vols = [f"{new}-m{m['index']}:{m['destination']}" for m in manifest.get("mounts", [])]
             spec = RunSpec.from_dict({**{k: v for k, v in spec_d.items() if k not in ("name", "network")},
                                       "image": image_ref, "env": envs, "ports": ports, "volumes": vols,
-                                      "labels": {**spec_d.get("labels", {}), "aisb.capsule": manifest["container"]}})
+                                      "labels": {**labels, "aisb.capsule": manifest["container"]}})
             ctr = Containers(self.t)
             cid = ctr.create_from(spec.merge(name=new))
             restored = 0
@@ -175,6 +207,15 @@ class Capsule(Resource, name="capsule"):
                 "missing_secrets": missing,
                 "next": [f"aisb containers doctor {new}"] + ([f"supply secrets: aisb capsule load {file} --env "
                                                                 + " --env ".join(f"{k}=..." for k in missing)] if missing else [])}
+
+    @staticmethod
+    def _fill_list(items: list[str], supplied: dict[str, str]) -> tuple[list[str], list[str]]:
+        out, missing = [], []
+        for item in items:
+            value, gone = redact.fill(item, supplied)
+            out.append(value)
+            missing += gone
+        return out, missing
 
     def _ensure_image(self, image: dict[str, Any]) -> str:
         from .images import Images

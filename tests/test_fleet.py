@@ -45,9 +45,14 @@ FLEET = {"web1": {"ssh": "ops@10.0.0.1", "groups": ["web", "prod"], "labels": {"
     ("@edge", ["web1", "web2"]),                 # computed group: selectors, nesting a group
     ("@edge,&@canary", ["web1"]),
     ("region=u*", ["web2"]),
+    ("@prod&region=eu", ["db1", "web1"]),       # operators need no comma
+    ("@web!web2", ["web1"]),
+    ("@prod&!@web", ["db1"]),                    # and-not
+    ("all, !@prod ,&here", ["here"]),            # spaces around terms
+    ("@stable", ["web1"]),                       # computed group with an exclusion
 ])
 def test_select(expr, names):
-    inv = inv_of(FLEET, {"edge": ["@web"], "canary": ["web1", "build"]})
+    inv = inv_of(FLEET, {"edge": ["@web"], "canary": ["web1", "build"], "stable": ["@web", "!web2"]})
     assert [h.name for h in inv.select(expr)] == names
 
 

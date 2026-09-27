@@ -185,6 +185,10 @@ deny_if = { volumes = true }
 mode = "warn"
 ```
 
+The read-only governance commands (`policy rules`, `policy check`, `audit log`, `audit verify`,
+`config show`) are exempt from rules that don't name them in `match.op`, so a blanket rule never hides why
+something is denied.
+
 ```bash
 aisb policy rules -o table
 aisb policy check --on web1 -- containers rm api --force        # would this be allowed? why not?
@@ -266,7 +270,8 @@ aisb fleet ping @prod
 
 Groups come in two kinds:
 - **Assigned groups** are stored on hosts, set with `--group` or by bulk regrouping.
-- **Computed groups** are defined by selectors and always up to date. You edit them in the JSON file.
+- **Computed groups** are defined by selectors and always up to date. You edit them in the JSON file, e.g.
+  `"groups": {"stable": ["@web", "!web2"]}`: their terms combine exactly like a command-line selector.
 
 ```bash
 aisb fleet group canary --add 'web*,&region=eu'      # bulk assign by selector
@@ -298,6 +303,7 @@ Computed groups in `fleet.json`:
 | `@web,!web2` | exclusion |
 | `!@db` | everything except @db |
 | `@web,&@canary,!web3` | combined: web canaries except web3 |
+| `@prod&region=eu!web2` | the same operators without commas (`&!x` = and-not) |
 
 Always check a selection first: `aisb fleet hosts '@prod,&region=eu'`.
 
@@ -823,6 +829,26 @@ aisb fleet query @web -- containers secrets api              # secrets in env / 
 aisb images secrets shop-api:1.5                             # before you ship it
 ```
 
+Make read-only database access server-enforced before agents or scripts query production data. Without a role,
+`db query` runs in a read-only *session*, which guards against accidents but not against SQL that resets the session:
+
+```bash
+aisb db grant-readonly shop-db                     # least-privilege login; `db query` uses it from now on
+aisb db query shop-db "select count(*) from orders" | jq .access   # "role aisb_ro"
+aisb fleet apply @db -- db grant-readonly shop-db  # every database host (credentials are kept per host)
+aisb db revoke-readonly shop-db --yes              # drop the role, forget the credential
+```
+
+The role gets `pg_read_all_data` on PostgreSQL 14+ (per-schema `SELECT` grants on older versions), and
+`SELECT, SHOW VIEW` on the named databases only for MySQL/MariaDB, never on `mysql.*`. Its password is generated
+and kept only in `$AISB_HOME/credentials/db-roles.json` (0600). To refuse queries that would fall back to a
+session guard, set this in config.toml, e.g. on the box your MCP agents use:
+
+```toml
+[db]
+readonly_role = "required"
+```
+
 SBOM per host, for CVE matching in your scanner of choice:
 
 ```bash
@@ -990,7 +1016,7 @@ claude mcp add aisb -- aisb mcp                        # everything; destroy too
 
 The inventory is picked up from `$AISB_FLEET`, so the agent sees the same hosts and groups you do.
 Policy rules with `source = "mcp"` restrict what agents may do, and every agent change is audited with
-`source: mcp`. The server also offers resources (`aisb://fleet/status`, `aisb://runbooks/pending`,
+`source: mcp`. Give agents server-enforced read-only SQL with `db grant-readonly` (§13) and `[db] readonly_role = "required"`. The server also offers resources (`aisb://fleet/status`, `aisb://runbooks/pending`,
 `aisb://audit/recent`, `aisb://policy/rules`, `aisb://runbooks/NAME`) and prompts (`investigate-incident`,
 `rollout`, `daily-check`, and one per runbook).
 

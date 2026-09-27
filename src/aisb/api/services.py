@@ -7,14 +7,15 @@ import time
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar
 
+from .. import context
 from ..models import RunSpec
 from ..ops import Resource, Tier, op
-from ..services import REGISTRY, SQL, Adapter, ServiceError, SQLite, Target
+from ..services import REGISTRY, SQL, Adapter, ServiceError, SQLite, Target, roles
 from ..services.fmt import infer, render, shape
 from ..services.mongo import Mongo
 from ..services.queues import Kafka, RabbitMQ, Search
 from ..services.redis import Redis
-from ..services.sql import diff_schema, gzip_sink
+from ..services.sql import MySQL, Postgres, diff_schema, gzip_sink
 from ..util import q
 from .containers import Containers
 
@@ -157,18 +158,112 @@ class Svc(Resource, name="svc"):
 
 
 class Db(Resource, name="db"):
+    def _role_key(self, container: str) -> str:
+        """Where a stored read-only credential belongs: this endpoint (or fleet host) and container."""
+        host = context.current().host
+        return f"{host.name if host else 'local:' + self.t.endpoint.url}/{container}"
+
+    def _readonly_access(self, db: SQL) -> str:
+        """Attach the stored read-only role to the adapter; say which boundary `db query` runs under."""
+        if not isinstance(db, (Postgres, MySQL)):
+            return "read-only file access"
+        if cred := roles.load(self._role_key(db.t.name)):
+            db.ro = (cred.user, cred.password)
+            return f"role {cred.user}"
+        if roles.mode() == "required":
+            raise ValueError(f"no read-only role for {db.t.name!r} and config [db] readonly_role = \"required\": "
+                             f"run `aisb db grant-readonly {db.t.name}` first")
+        return "read-only session"
+
     @op(Tier.READ)
-    def query(self, ref: Ref, sql: Annotated[str, "SQL to run in a read-only session (a guard against accidents, not a security boundary: use a read-only DB role for untrusted callers)"], *,
+    def query(self, ref: Ref, sql: Annotated[str, "SQL to run read-only: as the role from `db grant-readonly` when there "
+                                                  "is one (enforced by the server), else in a read-only session"], *,
               database: Database = None, format: Fmt = "json", limit: Annotated[int, "max rows; 0 = all"] = 1000,
               out: Out = None, seconds: Annotated[int, "statement timeout"] = 30,
               engine: Engine = None, path: DbPath = None) -> dict[str, Any]:
-        """Run a read-only SQL query in a Postgres/MySQL/MariaDB/SQLite container; returns typed rows."""
+        """Run a read-only SQL query in a Postgres/MySQL/MariaDB/SQLite container; returns typed rows.
+        `access` in the result says what enforces read-only: a least-privilege role, or only the session."""
         db = sql_adapter(self, ref, engine, path)
+        access = self._readonly_access(db)
         r = db.query(sql, readonly=True, database=database, seconds=seconds)
         # Type inference only for JSON; rendered formats keep the server's exact text (e.g. numeric scale).
         rows = infer(r.columns, r.rows) if format == "json" and db.kind != "sqlite" else r.rows
         return shape(r.columns, rows, fmt=format, limit=limit, out=out,
-                     meta={"engine": db.kind, "elapsed_ms": r.elapsed_ms})
+                     meta={"engine": db.kind, "access": access, "elapsed_ms": r.elapsed_ms})
+
+    @op(Tier.MUTATE, name="grant-readonly")
+    def grant_readonly(self, ref: Ref, *,
+                       database: Annotated[list[str] | None, "databases the role may read (repeatable; MySQL default: "
+                                                             "the container's database, else every user database)"] = None,
+                       user: Annotated[str, "role name"] = roles.DEFAULT_USER,
+                       engine: Annotated[Literal["postgres", "mysql"] | None, "override auto-detection"] = None) -> dict[str, Any]:
+        """Create (or re-key) a least-privilege login role that can read but never write, and make `db query` use
+        it for this container. Its password is generated and kept only in $AISB_HOME (0600), never printed."""
+        db = adapter(self, ref, SQL, engine=engine)
+        if not isinstance(db, (Postgres, MySQL)):
+            raise ValueError(f"{ref!r} runs {db.kind}: read-only roles are for postgres and mysql/mariadb")
+        planning = self.t.planning
+        password = "********" if planning else roles.new_password()  # a dry-run plan never shows the real one
+        warnings: list[str] = []
+        if isinstance(db, Postgres):
+            dbs = database or [db.database()]
+            num = db.query("show server_version_num", readonly=True).rows
+            version = int(num[0][0]) // 10000 if num and str(num[0][0]).isdigit() else 14
+            exists = bool(db.query(f"select 1 from pg_roles where rolname = {db.literal(user)}", readonly=True).rows)
+            schemas = {} if version >= 14 else {d: [s for (s,) in db.query(
+                "select nspname from pg_namespace where nspname not like 'pg\\_%' and nspname <> 'information_schema'",
+                readonly=True, database=d).rows] for d in dbs}
+            for d, stmts in roles.postgres_grant(user, password, exists=exists, version=version, schemas=schemas).items():
+                db.script(("".join(f"{s};\n" for s in stmts)).encode(), database=d or None, single_transaction=True)
+            scope = "every database (pg_read_all_data)" if version >= 14 else f"databases {dbs}"
+        else:
+            dbs = database or ([own] if (own := db.database()) else
+                               [n for (n,) in db.query("show databases", readonly=True).rows
+                                if n not in roles.MYSQL_SYSTEM])
+            if not dbs and not planning:
+                raise ValueError(f"{ref!r} has no user databases to grant; pass --database")
+            db.script(("".join(f"{s};\n" for s in roles.mysql_grant(user, password, dbs))).encode())
+            scope = f"databases {dbs}"
+        out: dict[str, Any] = {"engine": db.kind, "user": user, "scope": scope}
+        if planning:
+            return out
+        db.ro = (user, password)  # prove the role logs in and is read-only before `db query` relies on it
+        probe = "select current_setting('transaction_read_only') as ro" if isinstance(db, Postgres) else "select 1 as ok"
+        try:
+            db.query(probe, readonly=True, database=dbs[0] if dbs else None, seconds=10)
+        except ServiceError as e:
+            raise ServiceError(f"role {user} was created but cannot log in ({e}); check pg_hba.conf / the account "
+                               f"host, then run grant-readonly again") from None
+        if isinstance(db, Postgres) and db.query(f"select has_schema_privilege({db.literal(user)}, 'public', 'CREATE')",
+                                                 readonly=True, database=dbs[0]).rows[:1] == [["t"]]:
+            warnings.append("PUBLIC may CREATE in schema public (PostgreSQL < 15 default), so the role can create "
+                            "new tables there, though never change existing data; close it with "
+                            "`REVOKE CREATE ON SCHEMA public FROM PUBLIC` via `aisb db exec`")
+        roles.save(self._role_key(db.t.name), roles.stamp(roles.Credential(user, password, db.kind, dbs)))
+        return {**out, "stored": True, "warnings": warnings,
+                "next": f"aisb db query {db.t.name} '...' now connects as {user}"}
+
+    @op(Tier.DESTROY, name="revoke-readonly")
+    def revoke_readonly(self, ref: Ref, *, user: Annotated[str | None, "role name (default: the stored one)"] = None,
+                        engine: Annotated[Literal["postgres", "mysql"] | None, "override auto-detection"] = None) -> dict[str, Any]:
+        """Drop the read-only role and forget its stored credential; `db query` falls back to a read-only session."""
+        db = adapter(self, ref, SQL, engine=engine)
+        if not isinstance(db, (Postgres, MySQL)):
+            raise ValueError(f"{ref!r} runs {db.kind}: read-only roles are for postgres and mysql/mariadb")
+        key = self._role_key(db.t.name)
+        cred = roles.load(key)
+        name = user or (cred.user if cred else roles.DEFAULT_USER)
+        if isinstance(db, Postgres):
+            exists = self.t.planning or bool(
+                db.query(f"select 1 from pg_roles where rolname = {db.literal(name)}", readonly=True).rows)
+            if exists:
+                for d, stmts in roles.postgres_revoke(name, (cred.databases if cred else []) or [db.database()]).items():
+                    db.script(("".join(f"{s};\n" for s in stmts)).encode(), database=d or None)
+        else:
+            exists = True
+            db.script(("".join(f"{s};\n" for s in roles.mysql_revoke(name))).encode())
+        forgotten = False if self.t.planning else roles.forget(key)
+        return {"engine": db.kind, "user": name, "dropped": exists, "forgotten": forgotten}
 
     @op(Tier.MUTATE, name="exec")
     def exec_(self, ref: Ref, sql: Annotated[str | None, "SQL statement(s) to run with write access"] = None, *,

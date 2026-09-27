@@ -1266,3 +1266,28 @@ def test_pick_shapes():
     assert pick(rows, "name, state.up,") == [{"name": "a", "state.up": True}, {"name": "b", "state.up": False}]
     assert pick({"name": "x", "other": 1}, "name") == {"name": "x"}
     assert pick("scalar", "name") == "scalar" and pick([], "name") == []
+
+
+def test_governance_reads_stay_usable_under_a_blanket_rule(cli, daemon):
+    write_config("""
+        [[policy.rules]]
+        name = "everything needs a ticket"
+        require = { ticket = true }
+    """)
+    assert cli("policy", "rules")[0] == EXIT_OK                       # how you find out *why* you are blocked
+    assert cli("policy", "check", "--", "volumes", "rm", "v")[1]["allowed"] is False
+    assert cli("audit", "log")[0] == EXIT_OK and cli("audit", "verify")[0] == EXIT_OK
+    assert cli("config", "show")[0] == EXIT_OK
+    assert cli("volumes", "list")[0] == EXIT_POLICY                   # every other op still needs the ticket
+
+
+def test_a_rule_naming_a_governance_op_still_applies(cli, daemon):
+    write_config("""
+        [[policy.rules]]
+        name = "agents may not read the audit log"
+        match = { op = "audit.*", source = "cli" }
+        deny = true
+    """)
+    code, _, err = cli("audit", "log")
+    assert code == EXIT_POLICY and "agents may not read the audit log" in err
+    assert cli("policy", "rules")[0] == EXIT_OK

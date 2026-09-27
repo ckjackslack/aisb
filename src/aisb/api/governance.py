@@ -86,5 +86,5 @@ class Config(Resource, name="config"):
         return {"path": str(cfg.path), "exists": bool(cfg.path and cfg.path.exists()), "profile": cfg.profile,
                 "profiles": cfg.profiles, "defaults": cfg.defaults, "aliases": cfg.aliases, "audit": cfg.audit,
                 "audit_log": str(audit.path()), "policy_rules": len(cfg.policy),
-                "notify": {k: v.get("type") for k, v in cfg.notify.items()},
+                "notify": {k: v.get("type") for k, v in cfg.notify.items()}, "db": cfg.db,
                 "plugins": {k: (v or "ok") for k, v in plugins._LOADED.items()}}

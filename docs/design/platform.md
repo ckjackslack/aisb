@@ -84,6 +84,9 @@ Effects:
   - `volumes` (`--volumes` data deletion)
   - `force`
 
+Read-only governance ops (`policy.rules`, `policy.check`, `audit.log`, `audit.verify`, `config.show`) are exempt
+from rules that don't name them in `match.op`, so a blanket rule can't hide why something was denied.
+
 Evaluated in `invoke()` for real runs *and* previews: a `--dry-run` shows the plan plus the rules that would block it.
 MCP returns the violation as a tool error, and the portal returns 403. `aisb policy check -- RESOURCE OP ...` explains
 a decision without running anything, and `aisb policy rules` lists the effective rules.

@@ -26,6 +26,7 @@ class Config:
     notify: dict[str, dict[str, Any]] = field(default_factory=dict)
     policy: list[dict[str, Any]] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
+    db: dict[str, Any] = field(default_factory=dict)
     profiles: list[str] = field(default_factory=list)
 
     def defaults_for(self, qualname: str) -> dict[str, Any]:
@@ -58,7 +59,7 @@ def parse(data: Mapping[str, Any], *, profile: str | None = None, path: Path | N
         raise ValueError(f"unknown profile {profile!r} (profiles: {', '.join(sorted(profiles)) or 'none'})")
     merged = _merge({k: v for k, v in data.items() if k != "profiles"}, profiles.get(profile, {})) if profile \
         else {k: v for k, v in data.items() if k != "profiles"}
-    known = {"defaults", "aliases", "audit", "plugins", "notify", "policy", "env"}
+    known = {"defaults", "aliases", "audit", "plugins", "notify", "policy", "env", "db"}
     if unknown := set(merged) - known:
         raise ValueError(f"{path or 'config'}: unknown sections {sorted(unknown)} (known: {sorted(known | {'profiles'})})")
     policy = merged.get("policy") or {}
@@ -71,6 +72,7 @@ def parse(data: Mapping[str, Any], *, profile: str | None = None, path: Path | N
         notify={k: dict(v) for k, v in (merged.get("notify") or {}).items()},
         policy=[dict(r) for r in (policy.get("rules") or [])],
         env={k: str(v) for k, v in (merged.get("env") or {}).items()},
+        db=dict(merged.get("db") or {}),
         profiles=sorted(profiles),
     )
 

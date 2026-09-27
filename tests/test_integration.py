@@ -293,3 +293,26 @@ def test_system_remediate_live(docker, name):
     assert any(p.get("remediate") == "start-exited" for p in plan.planned)
     out = docker.system.remediate(container=[name])
     assert [(a["container"], a["rule"], a["status"]) for a in out["actions"]] == [(name, "start-exited", "done")]
+
+
+@pytest.mark.parametrize(("image", "env", "table", "bypass"), [
+    ("postgres:16-alpine", ["POSTGRES_PASSWORD=pw", "POSTGRES_DB=shop"], "create table t (id int primary key)",
+     "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE; COMMIT; INSERT INTO t VALUES (2)"),
+    ("mariadb:11", ["MARIADB_ROOT_PASSWORD=pw", "MARIADB_DATABASE=shop"], "create table t (id int primary key)",
+     "SET SESSION TRANSACTION READ WRITE; INSERT INTO t VALUES (2)"),
+])
+def test_readonly_role_is_enforced_by_the_server(docker, service, image, env, table, bypass):
+    """The read-only *session* can be reset from SQL; the role from `db grant-readonly` cannot write at all."""
+    db = service(image, env=env)
+    assert docker.svc.ready(db, within=120, stable=1)["ok"]
+    docker.db.exec_(db, f"{table}; insert into t values (1)")
+    docker.db.query(db, bypass)                                   # session guard only: the write goes through
+    assert docker.db.query(db, "select count(*) n from t")["rows"] == [{"n": 2}]
+    granted = invoke(docker, get_op("db.grant-readonly"), {"ref": db}).result
+    assert granted["stored"] and granted["user"] == "aisb_ro"
+    with pytest.raises(DockerError, match="denied"):
+        docker.db.query(db, bypass.replace("(2)", "(3)"))          # same SQL as the role: refused by the server
+    out = docker.db.query(db, "select count(*) n from t")
+    assert out["access"] == "role aisb_ro" and out["rows"] == [{"n": 2}]
+    invoke(docker, get_op("db.revoke-readonly"), {"ref": db}, confirm=True)
+    assert docker.db.query(db, "select 1 as ok")["access"] == "read-only session"

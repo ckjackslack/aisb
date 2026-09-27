@@ -251,3 +251,19 @@ def test_fan_out_negative_retries_means_one_attempt(retries):
     results, _ = runner.fan_out([Host("down")], fn, retries=retries)
     assert (results[0].ok, results[0].attempts, calls) == (False, 1, ["down"])
 
+
+
+@pytest.mark.parametrize("fmt", ["csv", "table", "markdown"])
+def test_fmt_renders_booleans_like_json(fmt):
+    from aisb.services.fmt import render
+    out = render(["ok", "n"], [[True, 1], [False, None]], fmt)
+    assert "true" in out and "false" in out and "True" not in out and "False" not in out
+
+
+@pytest.mark.parametrize(("line", "value"), [
+    ("redis_version:7.2", "7.2"), ("redis_version:7.2.10", "7.2.10"), ("gcc_version:12.2.0", "12.2.0"),
+    ("uptime_in_seconds:42", 42), ("mem_fragmentation_ratio:1.5", 1.5),
+])
+def test_redis_info_keeps_versions_as_text(line, value):
+    from aisb.services.redis import parse_info
+    assert parse_info(f"# Server\n{line}\n")["server"][line.split(":")[0]] == value

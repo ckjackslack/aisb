@@ -197,7 +197,9 @@ class World:
 
         def get_volume(seen):
             n = seen.path.split("/")[2]
-            return Reply(json={"Name": n, "Driver": "local"}) if n in W.volumes else Reply(404, json={"message": "no"})
+            return Reply(json={"Name": n, "Driver": "local", "Labels": W.volumes[n]["labels"],
+                               "Options": W.volumes[n].get("options") or {}}) \
+                if n in W.volumes else Reply(404, json={"message": "no"})
 
         def create_volume(seen):
             W.volumes.setdefault(seen.body["Name"], {"files": {}, "labels": seen.body.get("Labels") or {}})
@@ -1042,3 +1044,49 @@ def test_session_created_then_removed_volume_is_not_resurrected(world, dk):
     do(dk, "volumes.rm", ref="scratch")
     out = do(dk, "session.rollback")
     assert out["failed"] == [] and world.volumes == {}
+
+
+def test_rollback_recreates_removed_volumes_with_their_labels_and_options(world, dk):
+    world.volumes["pg"] = {"files": {"base/1": b"page"}, "labels": {"com.docker.compose.project": "shop"},
+                           "options": {"type": "tmpfs"}}
+    world.add_container("db", anon={"/data": "anon1"})
+    world.volumes["anon1"]["labels"] = {"tier": "db"}
+    do(dk, "session.begin")
+    do(dk, "volumes.rm", ref="pg")
+    do(dk, "containers.rm", ref="db", force=True, volumes=True)
+    out = do(dk, "session.rollback")
+    assert out["failed"] == []
+    assert world.volumes["pg"]["labels"] == {"com.docker.compose.project": "shop"}   # not a bare auto-created one
+    assert world.volumes["anon1"]["labels"] == {"tier": "db"}
+    created = [s.body for s in world.d.seen if s.path == "/volumes/create"]
+    assert {"Name": "pg", "Driver": "local", "DriverOpts": {"type": "tmpfs"},
+            "Labels": {"com.docker.compose.project": "shop"}} in created
+    assert world.volumes["pg"]["files"] == {"base/1": b"page"}
+
+
+def test_rollback_skips_start_stop_of_containers_created_in_the_session(world, dk):
+    world.add_container("keep", running=True)
+    sid = do(dk, "session.begin")["session"]
+    world.add_container("tmp", running=True)                          # created during the session
+    do(dk, "containers.stop", ref="tmp")
+    do(dk, "containers.stop", ref="keep")
+    assert [e["inverse"]["container"] for e in journal(sid)] == ["tmp", "keep"]
+    out = do(dk, "session.rollback")
+    assert out["failed"] == []                                        # no spurious 404 for the removed "tmp"
+    steps = [s["step"] for s in out["steps"]]
+    assert "start keep" in steps and "start tmp" not in steps and "remove added container tmp" in steps
+    assert "tmp" not in world.containers and world.containers["keep"]["running"] is True
+
+
+def test_old_journals_without_container_names_still_roll_back(world, dk):
+    world.add_container("keep", running=True)
+    sid = do(dk, "session.begin")["session"]
+    do(dk, "containers.stop", ref="keep")
+    path = state.home("sessions", sid) / "journal.jsonl"
+    entries = [json.loads(line) for line in path.read_text().splitlines()]
+    for e in entries:
+        e["inverse"].pop("container")                                 # the shape older versions wrote
+    path.write_text("".join(json.dumps(e) + "\n" for e in entries))
+    out = do(dk, "session.rollback")
+    assert out["failed"] == [] and world.containers["keep"]["running"] is True
+

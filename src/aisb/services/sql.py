@@ -90,6 +90,9 @@ class Result:
 class SQL(Adapter):
     """Common surface for SQL engines."""
     dialect: str = ""
+    # (user, password) of a read-only login role (`db grant-readonly`): read-only queries connect as it, so the
+    # server enforces what the read-only session only guards
+    ro: tuple[str, str] | None = None
 
     def query(self, sql: str, *, readonly: bool = True, database: str | None = None, seconds: int = 30) -> Result:
         raise NotImplementedError
@@ -194,29 +197,33 @@ class Postgres(SQL):
     def database(self) -> str:
         return self.secret("POSTGRES_DB", "POSTGRESQL_DATABASE") or self.user()
 
-    def _conn(self, database: str | None) -> list[str]:
+    def _conn(self, database: str | None, *, ro: bool = False) -> list[str]:
         # With a known password use TCP (works for official and bitnami images); otherwise the trusted local socket.
-        host = ["-h", "127.0.0.1"] if self.password() else []
+        # The read-only role always goes over TCP, where its password is checked.
+        host = ["-h", "127.0.0.1"] if ro or self.password() else []
         if database and ("=" in database or database.startswith(("postgres://", "postgresql://"))):
             # psql/pg_dump read such a -d value as a connection string, whose `options`/`host` would override
             # PGOPTIONS (the read-only guard) or send the password elsewhere
             raise ValueError(f"postgres: database must be a plain name, not a connection string: {database!r}")
-        return [*host, "-U", self.user(), "-d", database or self.database()]
+        user = self.ro[0] if ro and self.ro else self.user()
+        return [*host, "-U", user, "-d", database or self.database()]
 
-    def _env(self, *, readonly: bool = False, seconds: int = 0) -> dict[str, str | None]:
+    def _env(self, *, readonly: bool = False, seconds: int = 0, ro: bool = False) -> dict[str, str | None]:
         opts = [*(["-c default_transaction_read_only=on"] if readonly else []),
                 *([f"-c statement_timeout={seconds * 1000}"] if seconds else [])]
-        return {"PGPASSWORD": self.password(), "PGAPPNAME": "aisb", "PGCONNECT_TIMEOUT": "10",
-                "PGOPTIONS": " ".join(opts) or None}
+        return {"PGPASSWORD": self.ro[1] if ro and self.ro else self.password(), "PGAPPNAME": "aisb",
+                "PGCONNECT_TIMEOUT": "10", "PGOPTIONS": " ".join(opts) or None}
 
     def query(self, sql: str, *, readonly: bool = True, database: str | None = None, seconds: int = 30) -> Result:
         if readonly and sql.lstrip().startswith("\\"):  # psql runs a -c starting with \ as a meta-command (\! = shell)
             raise ValueError("postgres: psql meta-commands (\\...) are not allowed in a read-only query")
 
+        ro = readonly and self.ro is not None
+
         def go() -> Result:
-            argv = ["psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", *self._conn(database), "--csv", "-P", "null=\\N",
-                    "-c", sql, "-c", f"\\echo {_MARK} :ROW_COUNT"]
-            out = self.run(argv, env=self._env(readonly=readonly, seconds=seconds)).stdout
+            argv = ["psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", *self._conn(database, ro=ro), "--csv", "-P",
+                    "null=\\N", "-c", sql, "-c", f"\\echo {_MARK} :ROW_COUNT"]
+            out = self.run(argv, env=self._env(readonly=readonly, seconds=seconds, ro=ro)).stdout
             body, found, tail = out.rpartition(f"{_MARK} ")
             if not found:
                 body, tail = out, ""
@@ -394,11 +401,12 @@ class MySQL(SQL):
         names = {"client": ("mariadb", "mysql"), "dump": ("mariadb-dump", "mysqldump")}[tool]
         return list(names if self.mariadb else names[::-1])
 
-    def _run(self, tool: str, args: list[str]) -> Any:
+    def _run(self, tool: str, args: list[str], *, ro: bool = False) -> Any:
         """Run the first client binary that exists (mariadb 11 dropped the mysql names)."""
         last = None
+        pw = self.ro[1] if ro and self.ro else self.password()
         for binary in self._client(tool):
-            res = self.run([binary, *args], env={"MYSQL_PWD": self.password()}, check=False)
+            res = self.run([binary, *args], env={"MYSQL_PWD": pw}, check=False)
             if res.code in (126, 127) or "executable file not found" in res.stdout + res.stderr:
                 last = res
                 continue
@@ -416,18 +424,21 @@ class MySQL(SQL):
             raise ValueError(f"mysql: invalid database name {db!r}")
         return db
 
-    def _auth(self, database: str | None) -> list[str]:
+    def _auth(self, database: str | None, *, ro: bool = False) -> list[str]:
         db = self._db(database)
-        return ["-u", self.user(), "--default-character-set=utf8mb4", *([db] if db else [])]
+        user = self.ro[0] if ro and self.ro else self.user()
+        return ["-u", user, "--default-character-set=utf8mb4", *([db] if db else [])]
 
     def query(self, sql: str, *, readonly: bool = True, database: str | None = None, seconds: int = 30) -> Result:
         if readonly and (cmd := mysql_client_command(sql)) is not None:  # e.g. `\! sh` or `system ...` runs a shell
             raise ValueError(f"mysql: client commands are not allowed in a read-only query: {cmd[:40]!r}")
 
+        ro = readonly and self.ro is not None
+
         def go() -> Result:
             pre = "SET SESSION TRANSACTION READ ONLY; " if readonly else ""
             body = f"{pre}{sql.strip().rstrip(';')};\nSELECT ROW_COUNT() AS {_MARK};"
-            out = self._run("client", [*self._auth(database), "--xml", "-e", body]).stdout
+            out = self._run("client", [*self._auth(database, ro=ro), "--xml", "-e", body], ro=ro).stdout
             sets = [ET.fromstring(doc) for doc in ("<?xml" + d for d in out.split("<?xml")[1:])]
             marker = sets.pop() if sets and sets[-1].find(f"row/field[@name='{_MARK}']") is not None else None
             affected = None

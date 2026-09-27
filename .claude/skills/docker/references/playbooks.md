@@ -153,7 +153,7 @@ Stop *looking for causes* at the first step that explains the problem. Still gat
 ## Reproduce a production-like bug locally
 
 1. On the machine with the bug: `aisb capsule create NAME bug.tar.gz --db-sample 0.02`. Add `--volumes` only if the data is needed and allowed to leave.
-2. Elsewhere: `aisb capsule load bug.tar.gz --env SECRET=...` for each `missing_secrets` entry.
+2. Elsewhere: `aisb capsule load bug.tar.gz --env SECRET=...` for each `missing_secrets` entry. Secrets that were in the command line are named like `arg:--requirepass`; load refuses until those are supplied.
 3. Before starting a new container: create it, then `aisb containers envcheck NAME` to catch missing or misspelled variables.
 4. `aisb images diff GOOD_IMAGE BAD_IMAGE` when a new image is the suspect.
 

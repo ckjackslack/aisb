@@ -37,6 +37,12 @@ def _backup_volume(client: HasResources, name: str, into: Path) -> str:
     return str(out)
 
 
+def _volume_meta(client: HasResources, name: str) -> dict[str, Any]:
+    """What `volumes create` needs to bring the volume back as it was, not as a bare auto-created one."""
+    v = client.transport.json("GET", f"/volumes/{q(name)}") or {}
+    return {"driver": v.get("Driver") or "local", "options": v.get("Options") or {}, "labels": v.get("Labels") or {}}
+
+
 def _container_state(client: HasResources, ref: str, artifacts: Path, *, volumes: bool) -> dict[str, Any]:
     info = client.transport.json("GET", f"/containers/{q(ref)}/json")
     inv: dict[str, Any] = {"kind": "recreate-container", "name": (info.get("Name") or ref).lstrip("/"),
@@ -46,6 +52,7 @@ def _container_state(client: HasResources, ref: str, artifacts: Path, *, volumes
                                         ((info.get("NetworkSettings") or {}).get("Networks") or {}).items()}}
     if volumes:  # `rm --volumes` deletes anonymous volumes: keep their contents
         inv["volumes"] = [{"name": m["Name"], "destination": m["Destination"],
+                           "meta": _volume_meta(client, m["Name"]),
                            "backup": _backup_volume(client, m["Name"], artifacts)}
                           for m in info.get("Mounts") or [] if m.get("Type") == "volume" and m.get("Name")]
     return inv
@@ -84,6 +91,7 @@ def capture(client: HasResources, o: Op, kwargs: Any) -> None:
             try:
                 client.transport.json("GET", f"/volumes/{q(kwargs['ref'])}")
                 entry["inverse"] = {"kind": "restore-volume", "name": kwargs["ref"],
+                                    "meta": _volume_meta(client, kwargs["ref"]),
                                     "backup": _backup_volume(client, kwargs["ref"], artifacts)}
             except NotFound:
                 entry["inverse"] = {"kind": "remove-volume", "name": kwargs["ref"]}
@@ -107,7 +115,7 @@ def capture(client: HasResources, o: Op, kwargs: Any) -> None:
                 label = {"filters": {"label": [f"{STACK_KEY}={name}"]}}
                 steps += [_network_state(n) for n in client.transport.json("GET", "/networks", query=label) or []]
                 if kwargs.get("volumes"):
-                    steps += [{"kind": "restore-volume", "name": v["Name"],
+                    steps += [{"kind": "restore-volume", "name": v["Name"], "meta": _volume_meta(client, v["Name"]),
                                "backup": _backup_volume(client, v["Name"], artifacts)}
                               for v in (client.transport.json("GET", "/volumes", query=label) or {}).get("Volumes") or []]
             entry["inverse"] = {"kind": "group", "steps": steps + [
@@ -115,6 +123,7 @@ def capture(client: HasResources, o: Op, kwargs: Any) -> None:
         elif o.qualname in ("containers.stop", "containers.start", "containers.restart"):
             info = client.transport.json("GET", f"/containers/{q(kwargs['ref'])}/json")
             entry["inverse"] = {"kind": "set-running", "name": kwargs["ref"],
+                                "container": (info.get("Name") or "").lstrip("/") or None,
                                 "running": bool((info.get("State") or {}).get("Running"))}
         elif o.qualname in ("system.prune", "images.rmi"):
             entry["inverse"] = {"kind": "not-undoable", "reason": f"{o.qualname} cannot be reversed "
@@ -251,6 +260,9 @@ class Session(Resource, name="session"):
             for inv in [e["inverse"]] + e["inverse"].get("steps", []):
                 if inv.get("kind") in existed and inv.get("name") not in existed[inv["kind"]]:
                     continue
+                if inv.get("kind") == "set-running" and inv.get("container") and \
+                        inv["container"] not in existed["recreate-container"]:
+                    continue  # created during the session: rollback removes it, there is nothing to start/stop
                 self._undo(inv, ctr, lambda desc, fn: step(desc, fn, where))
             if not planning:
                 e["done"] = True
@@ -278,6 +290,7 @@ class Session(Resource, name="session"):
                                                                    if len(a) != 12)) if primary else spec
                 restored = {v["destination"]: v["name"] for v in inv.get("volumes") or []}
                 for v in inv.get("volumes") or []:
+                    self._ensure_volume(v["name"], v.get("meta"))
                     self.resource_volumes().restore(v["name"], v["backup"])
                 if restored:  # mount the restored volumes by name, not as fresh (empty) anonymous volumes
                     spec = spec.merge(volumes=tuple(f"{restored[v]}:{v}" if v in restored else v
@@ -300,8 +313,10 @@ class Session(Resource, name="session"):
                                                               "Internal": inv["internal"], "Labels": inv["labels"]})
             step(f"recreate network {inv['name']}", recreate_network)
         elif kind == "restore-volume":
-            step(f"restore volume {inv['name']}", lambda: self.resource_volumes().restore(inv["name"], inv["backup"],
-                                                                                        clear=True))
+            def restore_volume() -> None:
+                self._ensure_volume(inv["name"], inv.get("meta"))
+                self.resource_volumes().restore(inv["name"], inv["backup"], clear=True)
+            step(f"restore volume {inv['name']}", restore_volume)
         elif kind == "remove-volume":
             step(f"remove volume {inv['name']} (it didn't exist before)",
                  lambda: self.t.json("DELETE", f"/volumes/{q(inv['name'])}"))
@@ -313,6 +328,17 @@ class Session(Resource, name="session"):
         elif kind == "set-running":
             step(f"{'start' if inv['running'] else 'stop'} {inv['name']}",
                  lambda: self.t.json("POST", f"/containers/{q(inv['name'])}/{'start' if inv['running'] else 'stop'}"))
+
+    def _ensure_volume(self, name: str, meta: dict[str, Any] | None) -> None:
+        """Recreate a removed volume with its driver, options and labels before its data goes back in."""
+        if not meta:
+            return  # journals from older sessions: the restore helper creates a plain volume
+        try:
+            self.t.json("GET", f"/volumes/{q(name)}")
+        except NotFound:
+            self.t.json("POST", "/volumes/create", body={"Name": name, "Driver": meta.get("driver") or "local",
+                                                         "DriverOpts": meta.get("options") or {},
+                                                         "Labels": meta.get("labels") or {}})
 
     def resource_volumes(self) -> Any:
         from .volumes import Volumes

@@ -139,6 +139,8 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | op | tier | usage | summary |
 |---|---|---|---|
 | query | read | `aisb db query REF SQL [--database DATABASE] [--format FORMAT] [--limit LIMIT] [--out OUT] [--seconds SECONDS] [--engine ENGINE] [--path PATH]` | Run a read-only SQL query in a Postgres/MySQL/MariaDB/SQLite container; returns typed rows. |
+| grant-readonly | mutate | `aisb db grant-readonly REF [--database DATABASE]... [--user USER] [--engine ENGINE] [--dry-run]` | Create (or re-key) a least-privilege login role that can read but never write, and make `db query` use |
+| revoke-readonly | destroy | `aisb db revoke-readonly REF [--user USER] [--engine ENGINE] [--dry-run] [--yes]` | Drop the read-only role and forget its stored credential; `db query` falls back to a read-only session. |
 | exec | mutate | `aisb db exec REF [SQL] [--file FILE] [--database DATABASE] [--single-transaction] [--format FORMAT] [--seconds SECONDS] [--engine ENGINE] [--dry-run]` | Run SQL with write access (DML/DDL/migrations). Preview with --dry-run. |
 | tables | read | `aisb db tables REF [--database DATABASE] [--format FORMAT] [--engine ENGINE] [--path PATH]` | Tables and views with estimated rows and on-disk size. |
 | describe | read | `aisb db describe REF TABLE [--database DATABASE] [--engine ENGINE] [--path PATH]` | Columns, keys, indexes and constraints of one table. |

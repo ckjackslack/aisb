@@ -15,6 +15,9 @@ DEFAULT_SOCKET = "/var/run/docker.sock"
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
+# one selector term: an optional operator (`,` union, `&` intersect, `!` exclude, `&!` and-not), then an atom
+_TERM = re.compile(r"(,|&!|&|!|^)\s*([^,&!]+)")
+
 @dataclass(frozen=True, slots=True)
 class Host:
     name: str
@@ -118,8 +121,8 @@ class Inventory:
         if group in _seen:
             raise ValueError(f"group cycle: {' -> '.join([*_seen, group])}")
         found = {n for n, h in self.hosts.items() if group in h.groups}
-        for term in self.groups.get(group, ()):
-            found |= self._atom(term, _seen | {group})
+        if terms := self.groups.get(group):  # a computed group is a selector too: `["web*", "!web2"]`
+            found |= self._resolve(",".join(terms), _seen | {group})
         if not found and group not in self.groups and group not in self.group_names():
             raise ValueError(f"unknown group @{group} (groups: {', '.join(self.group_names()) or 'none'})")
         return found
@@ -140,20 +143,25 @@ class Inventory:
         return {atom}
 
     def select(self, expr: str) -> list[Host]:
-        """`web*,@db,&region=eu,!web2` -> hosts (sorted). Union of plain terms, then & intersects, ! subtracts."""
-        terms = [t.strip() for t in expr.split(",") if t.strip()]
-        if not terms:
-            raise ValueError("empty target (use `all`, a host, @group, label=value, a glob)")
-        plain = [t for t in terms if t[0] not in "!&"]
-        chosen = set().union(*(self._atom(t) for t in plain)) if plain else set(self.hosts)
-        for t in terms:
-            if t[0] == "&":
-                chosen &= self._atom(t[1:])
-            elif t[0] == "!":
-                chosen -= self._atom(t[1:])
+        """`web*,@db,&region=eu,!web2` -> hosts (sorted). Union of plain terms, then & intersects, ! subtracts.
+        `&` and `!` work with or without a comma before them: `@web&region=eu!web2`."""
+        chosen = self._resolve(expr)
         if not chosen:
             raise ValueError(f"{expr!r} selects no hosts")
         return [self.hosts[n] for n in sorted(chosen)]
+
+    def _resolve(self, expr: str, seen: frozenset[str] = frozenset()) -> set[str]:
+        terms = [(op, atom.strip()) for op, atom in _TERM.findall(expr) if atom.strip()]
+        if not terms:
+            raise ValueError("empty target (use `all`, a host, @group, label=value, a glob)")
+        plain = [atom for op, atom in terms if op not in ("&", "!", "&!")]
+        chosen = set().union(*(self._atom(a, seen) for a in plain)) if plain else set(self.hosts)
+        for op, atom in terms:
+            if op == "&":
+                chosen &= self._atom(atom, seen)
+            elif op in ("!", "&!"):  # "&!x" (and not x) is the same as "!x"
+                chosen -= self._atom(atom, seen)
+        return chosen
 
     def groups_of(self, name: str) -> list[str]:
         return sorted(g for g in self.group_names() if name in self.members(g))

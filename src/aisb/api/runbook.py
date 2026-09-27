@@ -224,6 +224,8 @@ class RunbookOps(Resource, name="runbook"):
                      error=error, ms=int((time.time() - s["started"]) * 1000))
             if not ok and not step.continue_on_error:
                 failed = True
+            elif not ok:
+                s["tolerated"] = True  # continue_on_error: reported, but not why the run failed
             runbooks.save(st)
         st["status"] = "failed" if failed else "done"
         st["ended"] = time.time()
@@ -232,14 +234,16 @@ class RunbookOps(Resource, name="runbook"):
 
     @staticmethod
     def _report(st: dict[str, Any], *, waiting: str | None = None) -> dict[str, Any]:
-        steps = [{"step": n, "status": s["status"], **{k: s[k] for k in ("attempts", "ms", "error") if s.get(k)}}
+        steps = [{"step": n, "status": s["status"],
+                  **{k: s[k] for k in ("attempts", "ms", "error", "tolerated") if s.get(k)}}
                  for n, s in st["steps"].items()]
         out: dict[str, Any] = {"run": st["run"], "runbook": st["runbook"], "status": st["status"], "steps": steps}
         if waiting:
             out.update(ok=False, reason=f"waiting for approval of {waiting!r}: {st['steps'][waiting].get('prompt')}",
                        next=[f"aisb runbook approve {st['run']} --resume", f"aisb runbook approve {st['run']} --deny"])
         elif st["status"] == "failed":
-            bad = next((n for n, s in st["steps"].items() if s["status"] == "failed"), "?")
+            failures = [n for n, s in st["steps"].items() if s["status"] == "failed"]
+            bad = next((n for n in failures if not st["steps"][n].get("tolerated")), failures[0] if failures else "?")
             out.update(ok=False, reason=f"step {bad!r} failed: {st['steps'][bad].get('error')}",
                        next=[f"aisb runbook show {st['run']}", f"aisb runbook resume {st['run']} --yes"])
         return out

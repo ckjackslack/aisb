@@ -72,31 +72,54 @@ class Ssh:
     @contextmanager
     def tunnel(self, remote_socket: str) -> Iterator[str]:
         """Forward the remote Docker socket to a private local unix socket for the duration of the block."""
+        t = Tunnel.open(self, remote_socket)
+        try:
+            yield t.path
+        finally:
+            t.close()
+
+
+@dataclass(slots=True)
+class Tunnel:
+    """A long-lived `ssh -N -L local.sock:remote.sock` process (reused across calls by the fleet pool)."""
+    proc: subprocess.Popen[bytes]
+    path: str
+    workdir: Path
+
+    @classmethod
+    def open(cls, ssh: "Ssh", remote_socket: str) -> "Tunnel":
         d = Path(tempfile.mkdtemp(prefix="aisb-t-", dir=_control_dir()))
         local = d / "d.sock"
         proc = subprocess.Popen(
-            [*self.argv(multiplex=False), "-N", "-o", "ExitOnForwardFailure=yes", "-o", "StreamLocalBindUnlink=yes",
-             "-L", f"{local}:{remote_socket}", self.target],
+            [*ssh.argv(multiplex=False), "-N", "-o", "ExitOnForwardFailure=yes", "-o", "StreamLocalBindUnlink=yes",
+             "-L", f"{local}:{remote_socket}", ssh.target],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        t = cls(proc, str(local), d)
+        deadline = time.monotonic() + ssh.connect_timeout + 5
+        while not local.exists():
+            if proc.poll() is not None:
+                err = (proc.stderr.read() if proc.stderr else b"").decode(errors="replace").strip()
+                t.close()
+                raise Unreachable(f"{ssh.target}: {err[-300:] or 'tunnel closed'}")
+            if time.monotonic() > deadline:
+                t.close()
+                raise Unreachable(f"{ssh.target}: tunnel to {remote_socket} did not come up")
+            time.sleep(0.02)
+        return t
+
+    @property
+    def alive(self) -> bool:
+        return self.proc.poll() is None and Path(self.path).exists()
+
+    def close(self) -> None:
+        self.proc.terminate()
         try:
-            deadline = time.monotonic() + self.connect_timeout + 5
-            while not local.exists():
-                if proc.poll() is not None:
-                    err = (proc.stderr.read() if proc.stderr else b"").decode(errors="replace").strip()
-                    raise Unreachable(f"{self.target}: {err[-300:] or 'tunnel closed'}")
-                if time.monotonic() > deadline:
-                    raise Unreachable(f"{self.target}: tunnel to {remote_socket} did not come up")
-                time.sleep(0.02)
-            yield str(local)
-        finally:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-            if proc.stderr:
-                proc.stderr.close()
-            shutil.rmtree(d, ignore_errors=True)
+            self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+        if self.proc.stderr:
+            self.proc.stderr.close()
+        shutil.rmtree(self.workdir, ignore_errors=True)
 
 
 class Forwarder:

@@ -18,6 +18,9 @@ Inv = Annotated[str | None, "inventory file (default: $AISB_FLEET or ~/.aisb/fle
 Parallel = Annotated[int, "hosts worked on concurrently"]
 Batch = Annotated[int | None, "rolling: this many hosts at a time"]
 FailFast = Annotated[bool, "stop starting new batches once a host failed"]
+Retries = Annotated[int, "retry a host whose SSH/tunnel setup failed (nothing ran there yet), with backoff"]
+HostTimeout = Annotated[float | None, "per-host wall-clock limit in seconds"]
+FailOn = Annotated[Literal["degraded", "failing", "down"] | None, "exit 4 when any host is at this level or worse"]
 Command = Annotated[str, "RESOURCE OP [ARGS...] of the aisb op to run on each host (after --)"]
 _VIA = {Tier.READ: "query", Tier.MUTATE: "apply", Tier.DESTROY: "destroy"}
 
@@ -131,7 +134,7 @@ class Fleet(Resource, name="fleet"):
     # --- health ---------------------------------------------------------------------------------
 
     @op(Tier.READ)
-    def ping(self, target: Target = "all", *, parallel: Parallel = 16, inventory: Inv = None) -> dict[str, Any]:
+    def ping(self, target: Target = "all", *, parallel: Parallel = 16, retries: Retries = 0, host_timeout: HostTimeout = None, inventory: Inv = None) -> dict[str, Any]:
         """Can each host be reached (SSH, then Docker)? Round-trip time and Docker version per host."""
         def one(h: Host) -> dict[str, Any]:
             t0 = time.monotonic()
@@ -139,7 +142,7 @@ class Fleet(Resource, name="fleet"):
                 v = d.transport.json("GET", "/version") or {}
             return {"docker": v.get("Version"), "api": v.get("ApiVersion"), "os": v.get("Os"),
                     "arch": v.get("Arch"), "rtt_ms": int((time.monotonic() - t0) * 1000)}
-        return self._fan(target, one, inventory, parallel=parallel)
+        return self._fan(target, one, inventory, parallel=parallel, retries=retries, host_timeout=host_timeout)
 
     def _status_one(self, h: Host, *, doctor: bool, tail: int) -> dict[str, Any]:
         from .system import System
@@ -158,8 +161,10 @@ class Fleet(Resource, name="fleet"):
                 "docker": info.get("ServerVersion"), "os": vitals.os or info.get("OperatingSystem"),
                 "uptime_h": round(vitals.uptime_s / 3600, 1) if vitals.uptime_s else None, "reasons": a.reasons}
 
-    def _status(self, hosts: list[Host], *, doctor: bool, tail: int, parallel: int) -> list[dict[str, Any]]:
-        results, _ = runner.fan_out(hosts, lambda h: self._status_one(h, doctor=doctor, tail=tail), parallel=parallel)
+    def _status(self, hosts: list[Host], *, doctor: bool, tail: int, parallel: int, retries: int = 0,
+                host_timeout: float | None = None) -> list[dict[str, Any]]:
+        results, _ = runner.fan_out(hosts, lambda h: self._status_one(h, doctor=doctor, tail=tail), parallel=parallel,
+                                    retries=retries, host_timeout=host_timeout)
         cols = next((list(r.result) for r in results if r.ok), ["verdict", "reasons"])
         rows = [{"host": r.host, **(r.result if r.ok else {**dict.fromkeys(cols), "verdict": "down",
                                                            "reasons": [r.error or "unreachable"]})}
@@ -170,23 +175,36 @@ class Fleet(Resource, name="fleet"):
     def status(self, target: Target = "all", *,
                doctor: Annotated[bool, "include container triage (slower on big hosts)"] = True,
                tail: Annotated[int, "log lines scanned per container by the triage; 0 = state/config only"] = 50,
-               parallel: Parallel = 16, inventory: Inv = None) -> dict[str, Any]:
-        """Which machines need attention and why: vitals (load, memory, disk) + container verdicts, worst first."""
-        rows = self._status(Inventory.load(inventory).select(target), doctor=doctor, tail=tail, parallel=parallel)
+               fail_on: FailOn = None, parallel: Parallel = 16, retries: Retries = 0,
+               host_timeout: HostTimeout = None, inventory: Inv = None) -> dict[str, Any]:
+        """Which machines need attention and why: vitals (load, memory, disk) + container verdicts, worst first.
+        With --fail-on, exits 4 when any host is at that level or worse (cron/CI gates)."""
+        rows = self._status(Inventory.load(inventory).select(target), doctor=doctor, tail=tail, parallel=parallel,
+                            retries=retries, host_timeout=host_timeout)
         summary = {v: sum(r["verdict"] == v for r in rows) for v in health.RANK}
-        return {"summary": summary, "hosts": rows,
-                "next": [f"aisb fleet doctor {r['host']}" for r in rows if r["verdict"] in ("failing", "degraded")][:5]}
+        out = {"summary": summary, "hosts": rows,
+               "next": [f"aisb fleet doctor {r['host']}" for r in rows if r["verdict"] in ("failing", "degraded")][:5]}
+        return {**out, **_gate(fail_on, {r["host"]: r["verdict"] for r in rows})}
 
     @op(Tier.READ)
     def watch(self, target: Target = "all", *, interval: Annotated[float, "seconds between checks"] = 30.0,
               duration: Annotated[float, "stop after N seconds"] = 300.0,
               until_change: Annotated[bool, "return at the first change"] = False,
               tail: Annotated[int, "log lines scanned per container"] = 50,
-              parallel: Parallel = 16, inventory: Inv = None) -> dict[str, Any]:
-        """Monitor: re-run status and report only changes: hosts going down/recovering, verdicts, new reasons."""
-        hosts = Inventory.load(inventory).select(target)
+              fail_on: FailOn = None, parallel: Parallel = 16, retries: Retries = 0,
+              host_timeout: HostTimeout = None, inventory: Inv = None) -> dict[str, Any]:
+        """Monitor: re-run status and report only changes: hosts going down/recovering, verdicts, new reasons.
+        Connections stay open across polls. With --fail-on, exits 4 if the final state is at that level or worse."""
+        with runner.pooled():
+            return self._watch(Inventory.load(inventory).select(target), interval=interval, duration=duration,
+                               until_change=until_change, tail=tail, fail_on=fail_on, parallel=parallel,
+                               retries=retries, host_timeout=host_timeout)
+
+    def _watch(self, hosts: list[Host], *, interval: float, duration: float, until_change: bool, tail: int,
+               fail_on: str | None, parallel: int, retries: int, host_timeout: float | None) -> dict[str, Any]:
         snap = lambda: {r["host"]: {"verdict": r["verdict"], "reasons": r["reasons"]}  # noqa: E731
-                        for r in self._status(hosts, doctor=True, tail=tail, parallel=parallel)}
+                        for r in self._status(hosts, doctor=True, tail=tail, parallel=parallel, retries=retries,
+                                              host_timeout=host_timeout)}
         begin, prev, events, polls = time.monotonic(), snap(), [], 1
         while time.monotonic() - begin + interval <= duration:
             time.sleep(interval)
@@ -196,13 +214,14 @@ class Fleet(Resource, name="fleet"):
             prev = cur
             if until_change and events:
                 break
-        return {"polls": polls, "events": events, "now": {h: s["verdict"] for h, s in prev.items()},
-                "attention": sorted(h for h, s in prev.items() if s["verdict"] != "healthy")}
+        now_ = {h: s["verdict"] for h, s in prev.items()}
+        return {"polls": polls, "events": events, "now": now_,
+                "attention": sorted(h for h, v in now_.items() if v != "healthy"), **_gate(fail_on, now_)}
 
     @op(Tier.READ)
     def ps(self, target: Target = "all", *, all: Annotated[bool, "include stopped containers"] = False,
            name: Annotated[str | None, "only containers whose name matches this glob"] = None,
-           parallel: Parallel = 16, inventory: Inv = None) -> dict[str, Any]:
+           parallel: Parallel = 16, retries: Retries = 0, host_timeout: HostTimeout = None, inventory: Inv = None) -> dict[str, Any]:
         """Containers across machines in one table (host column)."""
         import fnmatch
 
@@ -210,18 +229,20 @@ class Fleet(Resource, name="fleet"):
             with runner.docker(h) as d:
                 rows = _plain(d.containers.ls(all=all))
             return [r for r in rows if not name or fnmatch.fnmatch(r["name"], name)]
-        return self._fan(Inventory.load(inventory).select(target), one, None, parallel=parallel, flat=True)
+        return self._fan(Inventory.load(inventory).select(target), one, None, parallel=parallel, flat=True,
+                         retries=retries, host_timeout=host_timeout)
 
     @op(Tier.READ)
     def doctor(self, target: Target = "all", *, tail: Annotated[int, "log lines scanned per container"] = 100,
-               parallel: Parallel = 8, inventory: Inv = None) -> dict[str, Any]:
+               parallel: Parallel = 8, retries: Retries = 0, host_timeout: HostTimeout = None, inventory: Inv = None) -> dict[str, Any]:
         """Container problems across machines, worst first, with the host each one is on."""
         from .system import System
 
         def one(h: Host) -> dict[str, Any]:
             with runner.docker(h) as d:
                 return System(d.transport).doctor(tail=tail)
-        results, _ = runner.fan_out(Inventory.load(inventory).select(target), one, parallel=parallel)
+        results, _ = runner.fan_out(Inventory.load(inventory).select(target), one, parallel=parallel, retries=retries,
+                                    host_timeout=host_timeout)
         order = {"failing": 0, "degraded": 1}
         problems = sorted(({"host": r.host, **p} for r in results if r.ok for p in r.result["problems"]),
                           key=lambda p: (order.get(p["verdict"], 2), p["host"], p["container"]))
@@ -232,7 +253,7 @@ class Fleet(Resource, name="fleet"):
 
     @op(Tier.MUTATE)
     def ship(self, image: Annotated[str, "local image reference"], target: Target, *,
-             parallel: Parallel = 4, batch: Batch = None, fail_fast: FailFast = False,
+             parallel: Parallel = 4, retries: Retries = 0, host_timeout: HostTimeout = None, batch: Batch = None, fail_fast: FailFast = False,
              inventory: Inv = None) -> dict[str, Any]:
         """Copy an image from this machine to the selected hosts (no registry needed; air-gapped friendly).
         Hosts that already have the same image ID are skipped."""
@@ -276,33 +297,38 @@ class Fleet(Resource, name="fleet"):
                     if not present(d):
                         raise ValueError(f"load finished but {image} is not there: {'; '.join(msgs)[-200:]}")
                 return {"action": "loaded", "bytes": size}
-            out = self._fan(hosts, one, None, parallel=parallel, batch=batch, fail_fast=fail_fast)
+            out = self._fan(hosts, one, None, parallel=parallel, batch=batch, fail_fast=fail_fast, retries=retries,
+                            host_timeout=host_timeout)
         return {"image": image, "tags": tags, "bytes": size, **out}
 
     # --- run anything, tier-preserving ------------------------------------------------------------
 
     @op(Tier.READ)
-    def query(self, target: Target, *command: Command, parallel: Parallel = 8, batch: Batch = None,
+    def query(self, target: Target, *command: Command, parallel: Parallel = 8, retries: Retries = 0, host_timeout: HostTimeout = None, batch: Batch = None,
               fail_fast: FailFast = False, flat: Annotated[bool, "merge list results into one table"] = False,
               inventory: Inv = None) -> dict[str, Any]:
         """Run a read op on every selected host: `fleet query @prod -- containers logs api --tail 50`."""
-        return self._run(target, command, Tier.READ, parallel, batch, fail_fast, inventory, flat=flat)
+        return self._run(target, command, Tier.READ, parallel, batch, fail_fast, inventory, retries=retries,
+                         host_timeout=host_timeout, flat=flat)
 
     @op(Tier.MUTATE)
-    def apply(self, target: Target, *command: Command, parallel: Parallel = 8, batch: Batch = None,
+    def apply(self, target: Target, *command: Command, parallel: Parallel = 8, retries: Retries = 0, host_timeout: HostTimeout = None, batch: Batch = None,
               fail_fast: FailFast = False, inventory: Inv = None) -> dict[str, Any]:
         """Run a mutate op on every selected host; `--dry-run` returns each host's planned API calls.
         Rolling: `fleet apply @web --batch 1 --fail-fast -- containers restart api`."""
-        return self._run(target, command, Tier.MUTATE, parallel, batch, fail_fast, inventory)
+        return self._run(target, command, Tier.MUTATE, parallel, batch, fail_fast, inventory, retries=retries,
+                         host_timeout=host_timeout)
 
     @op(Tier.DESTROY)
-    def destroy(self, target: Target, *command: Command, parallel: Parallel = 8, batch: Batch = None,
+    def destroy(self, target: Target, *command: Command, parallel: Parallel = 8, retries: Retries = 0, host_timeout: HostTimeout = None, batch: Batch = None,
                 fail_fast: FailFast = False, inventory: Inv = None) -> dict[str, Any]:
         """Run a destroy op on every selected host. Without --yes: each host's plan, exit 3, nothing changed."""
-        return self._run(target, command, Tier.DESTROY, parallel, batch, fail_fast, inventory)
+        return self._run(target, command, Tier.DESTROY, parallel, batch, fail_fast, inventory, retries=retries,
+                         host_timeout=host_timeout)
 
     def _run(self, target: str, command: Sequence[str], tier: Tier, parallel: int, batch: int | None,
-             fail_fast: bool, inventory: str | None, *, flat: bool = False) -> dict[str, Any]:
+             fail_fast: bool, inventory: str | None, *, flat: bool = False, retries: int = 0,
+             host_timeout: float | None = None) -> dict[str, Any]:
         o, kwargs = _inner(command, tier)
         planning = self.t.planning and tier is not Tier.READ
 
@@ -314,7 +340,7 @@ class Fleet(Resource, name="fleet"):
                     return {"planned": res.planned, **({"warnings": res.warnings} if res.warnings else {})}
                 return _plain(invoke(d, o, kwargs, confirm=True).result)
         out = self._fan(Inventory.load(inventory).select(target), one, None, parallel=parallel, batch=batch,
-                        fail_fast=fail_fast, flat=flat)
+                        fail_fast=fail_fast, flat=flat, retries=retries, host_timeout=host_timeout)
         if planning:
             for r in out["results"]:
                 self.t.note(host=r["host"], op=o.qualname, **(r["result"] if r["ok"] else {"error": r["error"]}))
@@ -324,7 +350,7 @@ class Fleet(Resource, name="fleet"):
     def shell(self, target: Target, *cmd: Annotated[str, "shell command for the machines (after --)"],
               sudo: Annotated[bool, "run through `sudo -n`"] = False,
               seconds: Annotated[float, "per-host timeout"] = 60.0,
-              parallel: Parallel = 8, batch: Batch = None, fail_fast: FailFast = False,
+              parallel: Parallel = 8, retries: Retries = 0, host_timeout: HostTimeout = None, batch: Batch = None, fail_fast: FailFast = False,
               max_bytes: Annotated[int, "output kept per host"] = 16 * 1024, inventory: Inv = None) -> dict[str, Any]:
         """Run a command on the machines themselves over SSH (not in containers): `fleet shell @db -- df -h /var`."""
         if not cmd:
@@ -341,14 +367,17 @@ class Fleet(Resource, name="fleet"):
             code, out, err = runner.shell(h, line, timeout=seconds)
             return {"ok": code == 0, "exit_code": code, "stdout": clip(out, max_bytes)["output"],
                     "stderr": clip(err, max_bytes)["output"], "reason": f"exit {code}"}
-        return self._fan(hosts, one, None, parallel=parallel, batch=batch, fail_fast=fail_fast)
+        return self._fan(hosts, one, None, parallel=parallel, batch=batch, fail_fast=fail_fast, retries=retries,
+                         host_timeout=host_timeout)
 
     # --- plumbing ---------------------------------------------------------------------------------
 
     def _fan(self, target: str | list[Host], fn: Any, inventory: str | None, *, parallel: int = 8,
-             batch: int | None = None, fail_fast: bool = False, flat: bool = False) -> dict[str, Any]:
+             batch: int | None = None, fail_fast: bool = False, flat: bool = False, retries: int = 0,
+             host_timeout: float | None = None) -> dict[str, Any]:
         hosts = Inventory.load(inventory).select(target) if isinstance(target, str) else target
-        results, skipped = runner.fan_out(hosts, fn, parallel=parallel, batch=batch, fail_fast=fail_fast)
+        results, skipped = runner.fan_out(hosts, fn, parallel=parallel, batch=batch, fail_fast=fail_fast,
+                                          retries=retries, host_timeout=host_timeout)
         out: dict[str, Any] = {"summary": runner.summary(results, skipped)}
         if flat and all(isinstance(r.result, list) for r in results if r.ok):
             out["rows"] = [{"host": r.host, **(row if isinstance(row, dict) else {"value": row})}
@@ -360,6 +389,14 @@ class Fleet(Resource, name="fleet"):
             out["ok"] = False
             out["reason"] = f"{len(out['summary']['failed'])} host(s) failed: {', '.join(out['summary']['failed'])}"
         return out
+
+
+def _gate(fail_on: str | None, verdicts: dict[str, str]) -> dict[str, Any]:
+    """`ok: false` (exit 4) when any host is at the --fail-on level or worse."""
+    if not fail_on:
+        return {}
+    bad = sorted(h for h, v in verdicts.items() if health.RANK[v] >= health.RANK[fail_on])
+    return {"ok": not bad, **({"reason": f"{len(bad)} host(s) at '{fail_on}' or worse: {', '.join(bad)}"} if bad else {})}
 
 
 def _identity(inspect: dict[str, Any]) -> tuple[Any, ...]:

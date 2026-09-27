@@ -57,12 +57,20 @@ def capture(client: HasResources, o: Op, kwargs: Any) -> None:
     if not sid or o.resource in SKIP:
         return
     from .. import context
-    if context.current().host is not None:
-        return  # remote (fleet) changes are journaled per host; see capture_remote
+    host = context.current().host  # set for fleet inner ops: journal per machine, baseline on first touch
     d = _dir(sid)
+    if host is not None and not (base := d / f"baseline-{host.name}.json").exists():
+        from .system import System
+        try:
+            state.write_json(base, {"host": {"name": host.name, **host.to_dict()},
+                                    "baseline": System(client.transport).snapshot(), "at": time.time()})
+        except DockerError as e:
+            state.write_json(base, {"host": {"name": host.name, **host.to_dict()}, "baseline": None,
+                                    "error": str(e), "at": time.time()})
     session = state.read_json(d / "session.json") or {}
     artifacts = state.home("sessions", sid, "artifacts")
     entry: dict[str, Any] = {"id": uuid.uuid4().hex[:8], "at": time.time(), "op": o.qualname,
+                             "host": host.name if host else None,
                              "tier": str(o.tier), "args": _redacted(dict(kwargs)), "inverse": None, "done": False}
     try:
         if o.qualname == "containers.rm":
@@ -159,52 +167,77 @@ class Session(Resource, name="session"):
 
     @op(Tier.DESTROY)
     def rollback(self, *, session: Annotated[str | None, "session id (default: current)"] = None) -> dict[str, Any]:
-        """Return to the session baseline: remove what was added, then replay journaled inverses newest-first
-        (recreate removed containers, restore volumes and databases, restore run states). Idempotent."""
-        from .system import System
+        """Return to the session baseline on every machine it touched: remove what was added, then replay
+        journaled inverses newest-first (recreate removed containers, restore volumes and databases, restore run
+        states). Fleet hosts are reached over SSH and rolled back from their own baseline. Idempotent."""
+        from ..fleet import runner
+        from ..fleet.inventory import Host
         sid = session or current()
         if not sid:
             raise ValueError("no session to roll back")
         d = _dir(sid)
         meta = state.read_json(d / "session.json")
         journal = list(state.read_jsonl(d / "journal.jsonl"))
-        diff = snap.compare(meta["baseline"], System(self.t).snapshot())
         steps: list[dict[str, Any]] = []
+        planning = self.t.planning
 
-        def step(desc: str, fn: Any) -> None:
-            if self.t.planning:
-                self.t.note(step=desc)
-                steps.append({"step": desc, "status": "planned"})
+        def step(desc: str, fn: Any, where: str = "local") -> None:
+            label = desc if where == "local" else f"[{where}] {desc}"
+            if planning:
+                self.t.note(step=label)
+                steps.append({"step": label, "status": "planned"})
                 return
             try:
                 fn()
-                steps.append({"step": desc, "status": "done"})
+                steps.append({"step": label, "status": "done"})
             except (DockerError, ValueError, OSError) as e:
-                steps.append({"step": desc, "status": "failed", "error": str(e)})
+                steps.append({"step": label, "status": "failed", "error": str(e)})
 
+        self._scope(meta["baseline"], [e for e in journal if not e.get("host")], step, "local", planning)
+        for base in sorted(d.glob("baseline-*.json")):
+            rec = state.read_json(base)
+            hd = dict(rec["host"])
+            h = Host.from_dict(hd.pop("name"), hd)
+            entries = [e for e in journal if e.get("host") == h.name]
+            if rec.get("baseline") is None:
+                steps.append({"step": f"[{h.name}] baseline", "status": "failed",
+                              "error": rec.get("error") or "no baseline captured"})
+                continue
+            try:
+                with runner.docker(h) as remote:
+                    Session(remote.transport)._scope(rec["baseline"], entries, step, h.name, planning)
+            except (DockerError, OSError, runner.Unreachable) as e:
+                steps.append({"step": f"[{h.name}] connect", "status": "failed", "error": str(e)})
+        if not planning:
+            (d / "journal.jsonl").write_text("".join(json.dumps(e) + "\n" for e in journal))
+        hosts = sorted({e.get("host") or "local" for e in journal} | {"local"})
+        return {"session": sid, "hosts": hosts, "steps": steps, "failed": [s for s in steps if s["status"] == "failed"],
+                "not_undoable": [e["op"] for e in journal if (e.get("inverse") or {}).get("kind") in
+                                 ("not-undoable", "capture-failed")]}
+
+    def _scope(self, baseline: dict[str, Any], journal: list[dict[str, Any]], step: Any, where: str,
+               planning: bool) -> None:
+        """Roll one endpoint back to its baseline (self.t is that endpoint's transport)."""
+        from .system import System
+        diff = snap.compare(baseline, System(self.t).snapshot())
         recreated = {s["name"] for e in journal if not e["done"] and e.get("inverse")
                      for s in ([e["inverse"]] + e["inverse"].get("steps", [])) if s.get("kind") == "recreate-container"}
         for name in diff["containers"]["added"]:
             if name not in recreated:
                 step(f"remove added container {name}",
-                     lambda n=name: self.t.json("DELETE", f"/containers/{q(n)}", query={"force": True, "v": True}))
+                     lambda n=name: self.t.json("DELETE", f"/containers/{q(n)}", query={"force": True, "v": True}), where)
         ctr = Containers(self.t)
         for e in reversed(journal):
             if e["done"] or not e.get("inverse"):
                 continue
             for inv in [e["inverse"]] + e["inverse"].get("steps", []):
-                self._undo(inv, ctr, step)
-            if not self.t.planning:
+                self._undo(inv, ctr, lambda desc, fn: step(desc, fn, where))
+            if not planning:
                 e["done"] = True
         for name in diff["volumes"]["added"]:
-            step(f"remove added volume {name}", lambda n=name: self.t.json("DELETE", f"/volumes/{q(n)}"))
+            step(f"remove added volume {name}", lambda n=name: self.t.json("DELETE", f"/volumes/{q(n)}"), where)
         for name in diff["networks"]["added"]:
-            step(f"remove added network {name}", lambda n=name: self.t.json("DELETE", f"/networks/{q(n)}"))
-        if not self.t.planning:
-            (d / "journal.jsonl").write_text("".join(json.dumps(e) + "\n" for e in journal))
-        return {"session": sid, "steps": steps, "failed": [s for s in steps if s["status"] == "failed"],
-                "not_undoable": [e["op"] for e in journal if (e.get("inverse") or {}).get("kind") in
-                                 ("not-undoable", "capture-failed")]}
+            step(f"remove added network {name}", lambda n=name: self.t.json("DELETE", f"/networks/{q(n)}"), where)
 
     def _undo(self, inv: dict[str, Any], ctr: Containers, step: Any) -> None:
         kind = inv.get("kind")

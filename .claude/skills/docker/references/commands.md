@@ -100,7 +100,7 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | status | read | `aisb session status [--session SESSION]` | What changed since the session began, and which changes can be undone. |
 | list | read | `aisb session list` | Sessions on this machine, newest first. |
 | end | read | `aisb session end` | Stop journaling (artifacts are kept until you delete $AISB_HOME/sessions/ID). |
-| rollback | destroy | `aisb session rollback [--session SESSION] [--dry-run] [--yes]` | Return to the session baseline: remove what was added, then replay journaled inverses newest-first |
+| rollback | destroy | `aisb session rollback [--session SESSION] [--dry-run] [--yes]` | Return to the session baseline on every machine it touched: remove what was added, then replay |
 
 ## stack
 
@@ -233,16 +233,16 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | remove | mutate | `aisb fleet remove NAME [--inventory INVENTORY] [--dry-run]` | Remove a machine from the inventory (the machine itself is not touched). |
 | group | mutate | `aisb fleet group NAME [--add ADD] [--remove REMOVE] [--inventory INVENTORY] [--dry-run]` | Change group membership in bulk: `fleet group canary --add 'web*,&region=eu'`. |
 | export | read | `aisb fleet export [TARGET] [--format FORMAT] [--inventory INVENTORY]` | The inventory for other tools: a pyinfra inventory.py (groups kept), an ssh_config, or JSON. |
-| ping | read | `aisb fleet ping [TARGET] [--parallel PARALLEL] [--inventory INVENTORY]` | Can each host be reached (SSH, then Docker)? Round-trip time and Docker version per host. |
-| status | read | `aisb fleet status [TARGET] [--no-doctor] [--tail TAIL] [--parallel PARALLEL] [--inventory INVENTORY]` | Which machines need attention and why: vitals (load, memory, disk) + container verdicts, worst first. |
-| watch | read | `aisb fleet watch [TARGET] [--interval INTERVAL] [--duration DURATION] [--until-change] [--tail TAIL] [--parallel PARALLEL] [--inventory INVENTORY]` | Monitor: re-run status and report only changes: hosts going down/recovering, verdicts, new reasons. |
-| ps | read | `aisb fleet ps [TARGET] [--all] [--name NAME] [--parallel PARALLEL] [--inventory INVENTORY]` | Containers across machines in one table (host column). |
-| doctor | read | `aisb fleet doctor [TARGET] [--tail TAIL] [--parallel PARALLEL] [--inventory INVENTORY]` | Container problems across machines, worst first, with the host each one is on. |
-| ship | mutate | `aisb fleet ship IMAGE TARGET [--parallel PARALLEL] [--batch BATCH] [--fail-fast] [--inventory INVENTORY] [--dry-run]` | Copy an image from this machine to the selected hosts (no registry needed; air-gapped friendly). |
-| query | read | `aisb fleet query TARGET [-- COMMAND...] [--parallel PARALLEL] [--batch BATCH] [--fail-fast] [--flat] [--inventory INVENTORY]` | Run a read op on every selected host: `fleet query @prod -- containers logs api --tail 50`. |
-| apply | mutate | `aisb fleet apply TARGET [-- COMMAND...] [--parallel PARALLEL] [--batch BATCH] [--fail-fast] [--inventory INVENTORY] [--dry-run]` | Run a mutate op on every selected host; `--dry-run` returns each host's planned API calls. |
-| destroy | destroy | `aisb fleet destroy TARGET [-- COMMAND...] [--parallel PARALLEL] [--batch BATCH] [--fail-fast] [--inventory INVENTORY] [--dry-run] [--yes]` | Run a destroy op on every selected host. Without --yes: each host's plan, exit 3, nothing changed. |
-| shell | mutate | `aisb fleet shell TARGET [-- CMD...] [--sudo] [--seconds SECONDS] [--parallel PARALLEL] [--batch BATCH] [--fail-fast] [--max-bytes MAX_BYTES] [--inventory INVENTORY] [--dry-run]` | Run a command on the machines themselves over SSH (not in containers): `fleet shell @db -- df -h /var`. |
+| ping | read | `aisb fleet ping [TARGET] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--inventory INVENTORY]` | Can each host be reached (SSH, then Docker)? Round-trip time and Docker version per host. |
+| status | read | `aisb fleet status [TARGET] [--no-doctor] [--tail TAIL] [--fail-on FAIL_ON] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--inventory INVENTORY]` | Which machines need attention and why: vitals (load, memory, disk) + container verdicts, worst first. |
+| watch | read | `aisb fleet watch [TARGET] [--interval INTERVAL] [--duration DURATION] [--until-change] [--tail TAIL] [--fail-on FAIL_ON] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--inventory INVENTORY]` | Monitor: re-run status and report only changes: hosts going down/recovering, verdicts, new reasons. |
+| ps | read | `aisb fleet ps [TARGET] [--all] [--name NAME] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--inventory INVENTORY]` | Containers across machines in one table (host column). |
+| doctor | read | `aisb fleet doctor [TARGET] [--tail TAIL] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--inventory INVENTORY]` | Container problems across machines, worst first, with the host each one is on. |
+| ship | mutate | `aisb fleet ship IMAGE TARGET [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--batch BATCH] [--fail-fast] [--inventory INVENTORY] [--dry-run]` | Copy an image from this machine to the selected hosts (no registry needed; air-gapped friendly). |
+| query | read | `aisb fleet query TARGET [-- COMMAND...] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--batch BATCH] [--fail-fast] [--flat] [--inventory INVENTORY]` | Run a read op on every selected host: `fleet query @prod -- containers logs api --tail 50`. |
+| apply | mutate | `aisb fleet apply TARGET [-- COMMAND...] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--batch BATCH] [--fail-fast] [--inventory INVENTORY] [--dry-run]` | Run a mutate op on every selected host; `--dry-run` returns each host's planned API calls. |
+| destroy | destroy | `aisb fleet destroy TARGET [-- COMMAND...] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--batch BATCH] [--fail-fast] [--inventory INVENTORY] [--dry-run] [--yes]` | Run a destroy op on every selected host. Without --yes: each host's plan, exit 3, nothing changed. |
+| shell | mutate | `aisb fleet shell TARGET [-- CMD...] [--sudo] [--seconds SECONDS] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--batch BATCH] [--fail-fast] [--max-bytes MAX_BYTES] [--inventory INVENTORY] [--dry-run]` | Run a command on the machines themselves over SSH (not in containers): `fleet shell @db -- df -h /var`. |
 
 ## audit
 

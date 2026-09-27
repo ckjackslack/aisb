@@ -83,6 +83,67 @@ class Images(Resource, name="images"):
                                for p in sorted(inv.packages, key=lambda p: (p.ecosystem, p.name.lower()))]}
 
     @op(Tier.READ)
+    def vulns(self, ref: Ref, *,
+              min_severity: Annotated[Literal["low", "medium", "high", "critical"], "hide findings below this"] = "low",
+              limit: Annotated[int, "findings listed (counts cover all)"] = 50,
+              details: Annotated[bool, "fetch advisories for severity and fixed versions (one request each, cached)"] = True,
+              ) -> dict[str, Any]:
+        """Known vulnerabilities in an image's packages: its SBOM matched against OSV.dev ($AISB_OSV_URL), with
+        severity (CVSS v3 or the advisory's label), fixed versions and CVE aliases. Alpine, Debian, Ubuntu, PyPI, npm,
+        RubyGems are queried; other ecosystems are listed as not covered."""
+        from .. import supply
+        from ..insights import vulns as vl
+        from ..insights.packages import dedupe
+        inv = self.inventory(ref, hash_files=False)
+        comps = [{"ecosystem": p.ecosystem, "name": p.name, "version": p.version} for p in dedupe(inv.packages)]
+        queries, owners, skipped = vl.queries(comps, inv.os)
+        try:
+            ids = supply.osv_ids(queries) if queries else []
+            advisories = {vid: supply.osv_vuln(vid) for vid in sorted({i for group in ids for i in group})} \
+                if details else {}
+        except supply.SupplyError as e:
+            raise APIError(f"vulnerability lookup failed: {e} (set $AISB_OSV_URL to a reachable OSV mirror)") from None
+        rep = vl.report(owners, ids, advisories, queries, min_severity=min_severity)
+        return {"image": ref, "os": inv.os, "packages": len(comps), "queried": len(queries),
+                **({"not_covered": skipped} if skipped else {}), **rep, "findings": rep["findings"][:limit]}
+
+    @op(Tier.READ)
+    def updates(self, *refs: Annotated[str, "images to check (default: those used by running containers)"],
+                all: Annotated[bool, "check every tagged local image"] = False) -> list[dict[str, Any]]:
+        """Is a newer image published under the same tag? Compares local repo digests with the registry's current
+        manifest digest (anonymous tokens, or ~/.docker/config.json credentials). Nothing is pulled."""
+        from .. import supply
+        if not refs:
+            if all:
+                refs = tuple(t for i in self.t.json("GET", "/images/json") or [] for t in i.get("RepoTags") or []
+                             if t != "<none>:<none>")
+            else:
+                refs = tuple(sorted({c.get("Image", "") for c in self.t.json("GET", "/containers/json") or []
+                                     if c.get("Image") and not c["Image"].startswith("sha256:")}))
+        out = []
+        for ref in dict.fromkeys(refs):
+            try:
+                local = self.t.json("GET", f"/images/{q(ref)}/json") or {}
+            except APIError as e:
+                out.append({"image": ref, "status": "error", "error": str(e)})
+                continue
+            except Exception as e:  # noqa: BLE001 - NotFound etc.: report per image
+                out.append({"image": ref, "status": "missing", "error": str(e)})
+                continue
+            mine = {d.split("@", 1)[1] for d in local.get("RepoDigests") or [] if "@" in d}
+            if not mine and str(local.get("Id", "")).startswith("sha256:") and local.get("Descriptor"):
+                mine.add(local["Descriptor"].get("digest", ""))
+            try:
+                remote = supply.remote_digest(ref)
+            except supply.SupplyError as e:
+                out.append({"image": ref, "status": "unknown", "error": str(e)})
+                continue
+            status = "current" if remote in mine else "local-only" if not mine else "outdated"
+            out.append({"image": ref, "status": status, "local": sorted(mine)[:1], "remote": remote,
+                        **({"next": f"aisb images pull {ref}"} if status == "outdated" else {})})
+        return out
+
+    @op(Tier.READ)
     def diff(self, ref: Ref, other: Annotated[str, "second image"], *,
              top: Annotated[int, "largest file changes listed"] = 20) -> dict[str, Any]:
         """What changed between two images: files (by content), packages (up/downgrades), and config."""

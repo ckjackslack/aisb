@@ -163,3 +163,49 @@ class Net(Resource, name="net"):
         broken = next((st for st in steps if st["ok"] is False), None)
         return {"src": src, "dst": dst_name, "port": port, "ok": broken is None and steps[-1]["ok"] is True,
                 "broken_at": broken["step"] if broken else None, "steps": steps}
+
+    @op(Tier.READ)
+    def tls(self, ref: Ref, *, port: Annotated[int, "container TLS port"] = 443,
+            server_name: Annotated[str | None, "SNI / name to verify against (default: none sent)"] = None,
+            seconds: Annotated[float, "connect timeout"] = 10.0) -> dict[str, Any]:
+        """Certificate facts for a container's TLS port: subject, SANs, issuer, validity and days left, and whether
+        the chain verifies. Reaches published ports or the container IP (over SSH for fleet hosts)."""
+        import datetime as dt
+        import socket
+        import ssl
+        import tempfile
+
+        from .http import Http
+        host, hport, via = Http(self.t).resolve(ref, port)
+        dial = self.t.reach(host, hport)
+        insecure = ssl.create_default_context()
+        insecure.check_hostname, insecure.verify_mode = False, ssl.CERT_NONE
+        try:
+            with socket.create_connection(dial, timeout=seconds) as raw, \
+                    insecure.wrap_socket(raw, server_hostname=server_name) as tls_sock:
+                der, version, cipher = tls_sock.getpeercert(binary_form=True), tls_sock.version(), tls_sock.cipher()
+        except (OSError, ssl.SSLError) as e:
+            return {"ok": False, "reason": f"TLS handshake with {host}:{hport} failed: {e}", "via": via}
+        with tempfile.NamedTemporaryFile("w", suffix=".pem") as f:
+            f.write(ssl.DER_cert_to_PEM_cert(der))
+            f.flush()
+            cert = ssl._ssl._test_decode_cert(f.name)  # type: ignore[attr-defined]  # stdlib's own X.509 decoder
+        verified, verify_error = True, None
+        try:
+            with socket.create_connection(dial, timeout=seconds) as raw, \
+                    ssl.create_default_context().wrap_socket(raw, server_hostname=server_name or host):
+                pass
+        except ssl.SSLCertVerificationError as e:
+            verified, verify_error = False, e.verify_message or str(e)
+        except (OSError, ssl.SSLError) as e:
+            verified, verify_error = False, str(e)
+        name = lambda seq: ", ".join(f"{k}={v}" for rdn in seq for k, v in rdn)  # noqa: E731
+        not_after = dt.datetime.fromtimestamp(ssl.cert_time_to_seconds(cert["notAfter"]), dt.timezone.utc)
+        days = round((not_after - dt.datetime.now(dt.timezone.utc)).total_seconds() / 86400, 1)
+        return {"container": ref, "endpoint": f"{host}:{hport}", "via": via, "protocol": version,
+                "cipher": cipher[0] if cipher else None, "subject": name(cert.get("subject", ())),
+                "issuer": name(cert.get("issuer", ())), "san": [v for _, v in cert.get("subjectAltName", ())],
+                "not_before": cert.get("notBefore"), "not_after": cert.get("notAfter"), "days_left": days,
+                "expired": days < 0, "self_signed": cert.get("subject") == cert.get("issuer"),
+                "verified": verified, **({"verify_error": verify_error} if verify_error else {}),
+                "ok": days >= 14, **({"reason": f"certificate expires in {days} days"} if days < 14 else {})}

@@ -263,3 +263,24 @@ def test_pyinfra_connector_live(docker, name):
     ok, out = h.run_shell_command(StringCommand("cat", "/etc/aisb-test.conf"))
     assert ok and out.stdout == "k=v"
     assert h.get_fact(LinuxName) == "Alpine"
+
+
+def test_net_tls_live(docker, name, tmp_path):
+    import shutil
+    import subprocess
+    if not shutil.which("openssl"):
+        pytest.skip("needs openssl to mint a test certificate")
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", str(tmp_path / "key.pem"),
+                    "-out", str(tmp_path / "cert.pem"), "-days", "30", "-subj", "/CN=aisb.test",
+                    "-addext", "subjectAltName=DNS:aisb.test"], check=True, capture_output=True)
+    (tmp_path / "key.pem").chmod(0o644)
+    (tmp_path / "tls.conf").write_text("server { listen 443 ssl; ssl_certificate /c/cert.pem; "
+                                       "ssl_certificate_key /c/key.pem; location / { return 200; } }\n")
+    docker.containers.run("nginx:alpine", name=name, detach=True, volume=[f"{tmp_path}:/c:ro",
+                          f"{tmp_path}/tls.conf:/etc/nginx/conf.d/default.conf:ro"])
+    docker.containers.wait_for(name, running=True, within=10, interval=0.2)
+    import time
+    time.sleep(1)
+    res = docker.net.tls(name, port=443, server_name="aisb.test")
+    assert res["san"] == ["aisb.test"] and res["self_signed"] and not res["verified"]
+    assert 29 <= res["days_left"] <= 30 and res["ok"]

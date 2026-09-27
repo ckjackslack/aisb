@@ -43,6 +43,8 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | secrets | read | `aisb images secrets REF` | Credentials baked into an image: ENV/ARG values and build args in layer history, known token formats. |
 | slim | read | `aisb images slim REF` | Where an image's bytes are, and which Dockerfile habits put them there (with the fix for each). |
 | sbom | read | `aisb images sbom REF [--format FORMAT] [--ecosystem ECOSYSTEM]` | Software bill of materials read straight from the image's package databases (no scanner needed). |
+| vulns | read | `aisb images vulns REF [--min-severity MIN_SEVERITY] [--limit LIMIT] [--no-details]` | Known vulnerabilities in an image's packages: its SBOM matched against OSV.dev ($AISB_OSV_URL), with |
+| updates | read | `aisb images updates [-- REFS...] [--all]` | Is a newer image published under the same tag? Compares local repo digests with the registry's current |
 | diff | read | `aisb images diff REF OTHER [--top TOP]` | What changed between two images: files (by content), packages (up/downgrades), and config. |
 | envcheck | read | `aisb images envcheck REF [--env ENV]... [--env-file ENV_FILE] [--path PATH]...` | Preflight an image's env contract before running it: missing required vars and likely typos. |
 | pull | mutate | `aisb images pull REF [--dry-run]` | Pull an image (defaults to :latest). |
@@ -118,6 +120,7 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | graph | read | `aisb net graph [--samples SAMPLES] [--interval INTERVAL] [--stack STACK] [--format FORMAT]` | Live service map from established TCP connections: who calls whom (and egress), no instrumentation. |
 | map | read | `aisb net map` | Networks with their containers, IPs and DNS aliases; flags the default bridge (no DNS by name). |
 | probe | read | `aisb net probe SRC DST [--port PORT]` | Layer-by-layer check of src -> dst: shared network, dst listening (and on which address), DNS, TCP. |
+| tls | read | `aisb net tls REF [--port PORT] [--server-name SERVER_NAME] [--seconds SECONDS]` | Certificate facts for a container's TLS port: subject, SANs, issuer, validity and days left, and whether |
 
 ## svc
 

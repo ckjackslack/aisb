@@ -287,6 +287,9 @@ ruff check src tests && mypy       # lint + types (config in pyproject.toml); CI
 aisb docs --site site/             # static per-resource command reference
 ```
 
+Releases are cut from tags (GitHub release with sdist, wheel and `aisb.pyz`, optional PyPI trusted
+publishing): see [docs/RELEASING.md](docs/RELEASING.md).
+
 ## License and disclaimer
 
 Licensed under the [Apache License, Version 2.0](LICENSE): free to use, modify and redistribute, including

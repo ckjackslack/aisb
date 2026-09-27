@@ -92,10 +92,12 @@ def compare_specs(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
     return {"identical": not different, "different": different, "same": same}
 
 
-def port_open(spec: str, timeout: float = 1.0) -> bool:
+def port_open(spec: str, timeout: float = 1.0, *, reach: Callable[[str, int], tuple[str, int]] | None = None) -> bool:
+    """Is HOST:PORT (on the Docker host's network) accepting connections? `reach` routes it (e.g. over SSH)."""
     host, _, port = spec.rpartition(":")
     try:
-        with socket.create_connection((host or "127.0.0.1", int(port)), timeout=timeout):
+        addr = (host or "127.0.0.1", int(port))
+        with socket.create_connection(reach(*addr) if reach else addr, timeout=timeout):
             return True
     except (OSError, ValueError):
         return False
@@ -235,7 +237,7 @@ class Containers(Resource, name="containers"):
                 matched = next((line for line in text.splitlines() if rx.search(line)), None)
                 met["log"] = matched is not None
             if port:
-                met["port"] = port_open(port)
+                met["port"] = port_open(port, reach=self.t.reach)
             elapsed = round(time.monotonic() - begin, 2)
             if all(met.values()):
                 return {"ok": True, "elapsed": elapsed, "conditions": met, **({"matched": matched} if matched else {})}

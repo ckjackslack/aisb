@@ -6,7 +6,7 @@ import os
 import re
 import socket
 import ssl
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -156,6 +156,13 @@ class Transport:
         self.timeout = timeout
         self._version = version
         self._plan: list[Request | Note] | None = None
+        # Maps an address as seen from the Docker host to one this process can dial. Identity for a local daemon;
+        # fleet sets an SSH port forwarder for remote hosts (see aisb.fleet.ssh.Forwarder).
+        self.dialer: Callable[[str, int], tuple[str, int]] | None = None
+
+    def reach(self, host: str, port: int) -> tuple[str, int]:
+        """Where to connect for HOST:PORT on the Docker host's network (published ports, container IPs)."""
+        return self.dialer(host, port) if self.dialer else (host, port)
 
     @property
     def version(self) -> str:

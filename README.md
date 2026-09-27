@@ -94,6 +94,8 @@ aisb portal [--allow mutate]                           # local, token-protected 
 
 ## Fleet: many machines, one CLI
 
+> Hands-on recipes for sysadmins and DevOps (monitoring, rolling deploys, backups, security sweeps, cron/CI): **[docs/ops-guide.md](docs/ops-guide.md)**.
+
 `aisb fleet` works one level up, on an inventory of machines grouped and labelled, which you monitor and act on one host or many at a time.
 It stays stdlib-only. Transport is your OpenSSH client (`~/.ssh/config`, agent, ProxyJump all apply), and each remote Docker socket is
 forwarded to a private local socket, so **remote machines need only sshd and Docker**: no Python, no agent, no docker CLI.
@@ -124,7 +126,7 @@ Being stdlib-only, aisb ships as **one deterministic `.pyz`** (~160 KB) that run
 no pip, no venv, no docker CLI. `aisb bundle aisb.pyz`, copy it anywhere, `python3 aisb.pyz system doctor`.
 
 [pyinfra](https://pyinfra.com) is the natural carrier: agentless over SSH, and the optional integration
-(`pip install 'aisb[pyinfra]'`, `aisb.contrib.pyinfra`, never imported by the core) plugs in both directions.
+(`pip install -e '.[pyinfra]'`, `aisb.contrib.pyinfra`, never imported by the core) plugs in both directions.
 
 ```python
 # deploy.py: pyinfra -> hosts, aisb -> Docker on each host
@@ -151,7 +153,7 @@ readiness gate. Stack drift (a changed service config) is reported and left runn
 
 ## Design
 
-```
+```text
 transport.py   http.client over AF_UNIX / TCP+TLS; API version negotiation; typed errors; dry-run recorder
 streams.py     multiplexed stdout/stderr demux, JSON-stream decoder, tar contexts (.dockerignore)
 models.py      compact dataclass views + RunSpec (declarative container config -> API body)

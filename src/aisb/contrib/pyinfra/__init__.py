@@ -10,7 +10,7 @@ Python >= 3.11, over pyinfra's agentless SSH. Three pieces:
 - `connector`: `@aisb/NAME` or `@aisb/stack:NAME` inventory targets that run pyinfra operations *inside*
   containers through the Engine API (exec + archive), without a docker CLI on the controller.
 
-    pip install 'aisb[pyinfra]'
+    pip install -e '.[pyinfra]'          # from a checkout
     pyinfra inventory.py deploy.py          # deploy.py: from aisb.contrib.pyinfra import operations as aisb
     pyinfra @aisb/stack:shop exec -- uptime
 """

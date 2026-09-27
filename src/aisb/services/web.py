@@ -22,7 +22,7 @@ class ConfigReloadable(Adapter):
             addr = (self.t.ips[0], port)
         else:
             raise ServiceError(f"{self.kind}: port {port} is neither published nor reachable by IP")
-        if not port_open(f"{addr[0]}:{addr[1]}"):
+        if not port_open(f"{addr[0]}:{addr[1]}", reach=self.ctr.t.reach):
             raise ServiceError(f"{self.kind}: nothing listening on {addr[0]}:{addr[1]}")
         return f"tcp {addr[0]}:{addr[1]}"
 

@@ -363,6 +363,18 @@ def test_live_ssh_tunnel_shell_and_status(sshd, tmp_path):
     inv = inv_of({"live": sshd, "gone": {**sshd, "port": _free_port()}})
     inv.path = tmp_path / "fleet.json"
     inv.save()
+    local = Docker()
+    local.containers.run("busybox:1.36", "sh", "-c", "mkdir -p /w && echo fleet-http > /w/index.html && httpd -f -p 8080 -h /w",
+                         name="aisb-fleet-http", detach=True, port=[f"127.0.0.1:{_free_port()}:8080"])
+    try:
+        with runner.docker(host) as d:
+            d.containers.wait_for("aisb-fleet-http", running=True, within=10, interval=0.2)
+            res = d.http.get("aisb-fleet-http", "/", port=8080)
+            assert res["ok"] and res["body"].strip() == "fleet-http"
+            assert res["url"].startswith("http://127.0.0.1:")      # the address as the Docker host sees it
+            assert d.transport.dialer._open                       # ...reached through an SSH port forward
+    finally:
+        local.containers.rm("aisb-fleet-http", force=True)
     st = Docker().fleet.status(inventory=str(inv.path), tail=0)
     assert {h["host"]: h["verdict"] for h in st["hosts"]}["gone"] == "down"
     assert st["hosts"][-1]["host"] == "live" and st["hosts"][-1]["cpus"]

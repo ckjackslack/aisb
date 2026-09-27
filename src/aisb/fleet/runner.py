@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..errors import DockerError, DockerUnavailable
 from .inventory import Host
-from .ssh import Ssh, Unreachable, local_run
+from .ssh import Forwarder, Ssh, Unreachable, local_run
 
 if TYPE_CHECKING:
     from ..client import Docker
@@ -19,8 +19,15 @@ if TYPE_CHECKING:
 def docker(host: Host, *, timeout: float = 60.0) -> Iterator["Docker"]:
     from ..client import Docker  # late: aisb.client imports the api package, which imports this module
     if host.ssh:
-        with Ssh.of(host).tunnel(host.socket) as sock:
-            yield Docker(f"unix://{sock}", timeout=timeout)
+        ssh = Ssh.of(host)
+        fwd = Forwarder(ssh)
+        try:
+            with ssh.tunnel(host.socket) as sock:
+                d = Docker(f"unix://{sock}", timeout=timeout)
+                d.transport.dialer = fwd  # http/wait/brokers dial containers through SSH, from the host's viewpoint
+                yield d
+        finally:
+            fwd.close()
     else:
         yield Docker(host.docker, timeout=timeout)
 

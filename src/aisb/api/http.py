@@ -41,8 +41,9 @@ class Http(Resource, name="http"):
         if not path.startswith("/"):
             path = "/" + path
         ctx = ssl._create_unverified_context() if insecure else ssl.create_default_context()  # noqa: S323
-        conn = http.client.HTTPSConnection(host, hport, timeout=seconds, context=ctx) if https \
-            else http.client.HTTPConnection(host, hport, timeout=seconds)
+        dial_host, dial_port = self.t.reach(host, hport)
+        conn = http.client.HTTPSConnection(dial_host, dial_port, timeout=seconds, context=ctx) if https \
+            else http.client.HTTPConnection(dial_host, dial_port, timeout=seconds)
         start = time.monotonic()
         try:
             conn.request(method, path, body=body, headers={"User-Agent": "aisb", **headers})
@@ -138,7 +139,7 @@ class Http(Resource, name="http"):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
         from ..insights import traffic
-        host, hport, _ = self.resolve(ref, port)
+        host, hport = self.t.reach(*self.resolve(ref, port)[:2])
         exchanges: list[dict[str, Any]] = []
         lock = threading.Lock()
 
@@ -229,6 +230,7 @@ class Http(Resource, name="http"):
                 self.t.note(http=r["method"], url=f"http://{host}:{hport}{r['path']}")
             return {}
         results, ratios = [], []
+        host, hport = self.t.reach(host, hport)
         for r in rows:
             body = (r.get("req_body") or {}).get("text", "").encode() or None
             headers = {k: v for k, v in (r.get("req_headers") or {}).items()

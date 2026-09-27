@@ -3,8 +3,10 @@
 import os
 import shlex
 import shutil
+import socket
 import subprocess
 import tempfile
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -95,6 +97,58 @@ class Ssh:
             if proc.stderr:
                 proc.stderr.close()
             shutil.rmtree(d, ignore_errors=True)
+
+
+class Forwarder:
+    """`Transport.dialer` for an SSH host: HOST:PORT on the remote network -> an on-demand `ssh -L` on 127.0.0.1.
+
+    Forwards are opened lazily (only ops that dial containers pay for them), reused per address, and closed
+    together with the Docker tunnel.
+    """
+
+    def __init__(self, ssh: Ssh) -> None:
+        self.ssh = ssh
+        self._open: dict[tuple[str, int], tuple[int, subprocess.Popen[bytes]]] = {}
+        self._lock = threading.Lock()
+
+    def __call__(self, host: str, port: int) -> tuple[str, int]:
+        with self._lock:
+            if (hit := self._open.get((host, port))) and hit[1].poll() is None:
+                return "127.0.0.1", hit[0]
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", 0))
+                lport = s.getsockname()[1]
+            target = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+            proc = subprocess.Popen([*self.ssh.argv(multiplex=False), "-N", "-o", "ExitOnForwardFailure=yes",
+                                     "-L", f"127.0.0.1:{lport}:{target}", self.ssh.target],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            deadline = time.monotonic() + self.ssh.connect_timeout + 5
+            while True:
+                if proc.poll() is not None:
+                    err = (proc.stderr.read() if proc.stderr else b"").decode(errors="replace").strip()
+                    raise Unreachable(f"{self.ssh.target}: port forward to {target} failed: {err[-200:]}")
+                with socket.socket() as probe:
+                    if probe.connect_ex(("127.0.0.1", lport)) == 0:
+                        break
+                if time.monotonic() > deadline:
+                    proc.kill()
+                    raise Unreachable(f"{self.ssh.target}: port forward to {target} did not come up")
+                time.sleep(0.02)
+            self._open[(host, port)] = (lport, proc)
+            return "127.0.0.1", lport
+
+    def close(self) -> None:
+        with self._lock:
+            for _, proc in self._open.values():
+                proc.terminate()
+            for _, proc in self._open.values():
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                if proc.stderr:
+                    proc.stderr.close()
+            self._open.clear()
 
 
 def local_run(command: str, *, stdin: bytes | None = None, timeout: float = 60.0) -> subprocess.CompletedProcess[bytes]:

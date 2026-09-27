@@ -148,6 +148,7 @@ class RabbitMQ(Adapter):
                        else (self.t.ips[0], port) if self.t.ips else (None, None))
         if host is None:
             raise ServiceError("rabbitmq: management API not reachable (use a *-management image)")
+        host, hport = self.ctr.t.reach(host, hport)
         conn = http.client.HTTPConnection(host, hport, timeout=10)
         auth = base64.b64encode(f"{self.user()}:{self.password()}".encode()).decode()
         body = json.dumps({"count": limit, "ackmode": "ack_requeue_true", "encoding": "auto", "truncate": 50000})
@@ -201,6 +202,7 @@ class Search(Adapter):
                        else (self.t.ips[0], port) if self.t.ips else (None, None))
         if host is None:
             raise ServiceError("elasticsearch: port 9200 is neither published nor reachable by IP")
+        host, hport = self.ctr.t.reach(host, hport)
         headers = {"Content-Type": "application/json"}
         if self.password():
             headers["Authorization"] = "Basic " + base64.b64encode(f"{self.user()}:{self.password()}".encode()).decode()

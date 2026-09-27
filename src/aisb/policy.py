@@ -67,7 +67,7 @@ def matches(match: Mapping[str, Any], op: str, tier: str, ctx: Ctx) -> bool:
         return False
     if (users := _many(match.get("user"))) and not any(fnmatch.fnmatchcase(ctx.user, u) for u in users):
         return False
-    if (hosts := match.get("hosts")) and not _host_matches(str(hosts), ctx):
+    if (hosts := ",".join(_many(match.get("hosts")))) and not _host_matches(hosts, ctx):  # a list is a union
         return False
     return True
 

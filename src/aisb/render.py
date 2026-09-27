@@ -30,6 +30,7 @@ def rows_of(data: Any) -> tuple[list[dict[str, Any]] | None, str | None]:
 
 def pick(data: Any, paths: str) -> Any:
     """Project dotted paths (`name,state,result.ok`) on each row, or on the object itself."""
+    data = plain(data)  # ops may return dataclasses (e.g. `containers list`): project their fields too
     keys = [p.strip() for p in paths.split(",") if p.strip()]
     one = lambda r: {k: dig(r, k) for k in keys}  # noqa: E731
     rows, key = rows_of(data)

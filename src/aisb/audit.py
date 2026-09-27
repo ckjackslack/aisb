@@ -59,8 +59,14 @@ def _digest(prev: str, rec: Mapping[str, Any]) -> str:
 def _last_hash(fh: Any) -> str:
     fh.seek(0, os.SEEK_END)
     size = fh.tell()
-    fh.seek(max(0, size - 65536))
-    lines = [line for line in fh.read().splitlines() if line.strip()]
+    window = 65536
+    while True:  # widen the tail window until it holds the whole last record (records can exceed 64 KiB)
+        start = max(0, size - window)
+        fh.seek(start)
+        lines = [line for line in fh.read().splitlines() if line.strip()]
+        if start == 0 or len(lines) > 1:
+            break
+        window *= 4
     if not lines:
         return GENESIS
     try:
@@ -98,13 +104,19 @@ def _mirror(rec: Mapping[str, Any]) -> None:
         return
     logger = _SYSLOG.get(target)
     if logger is None:
-        if target.startswith(("udp://", "tcp://")):
-            import socket
-            host, _, port = target.split("://", 1)[1].rpartition(":")
-            handler = logging.handlers.SysLogHandler(
-                (host, int(port or 514)), socktype=socket.SOCK_STREAM if target.startswith("tcp") else socket.SOCK_DGRAM)
-        else:
-            handler = logging.handlers.SysLogHandler(target)
+        try:  # connecting can fail (tcp refused, unresolvable host): never after the change has already happened
+            if target.startswith(("udp://", "tcp://")):
+                import socket
+                host, sep, port = target.split("://", 1)[1].rpartition(":")
+                if not sep:  # "udp://logs.internal": no port given
+                    host, port = port, ""
+                handler = logging.handlers.SysLogHandler(
+                    (host, int(port or 514)),
+                    socktype=socket.SOCK_STREAM if target.startswith("tcp") else socket.SOCK_DGRAM)
+            else:
+                handler = logging.handlers.SysLogHandler(target)
+        except (OSError, ValueError):
+            return
         logger = logging.getLogger(f"aisb.audit.{len(_SYSLOG)}")
         logger.propagate, logger.level = False, logging.INFO
         logger.addHandler(handler)

@@ -184,7 +184,7 @@ def frame(stream: int, data: bytes) -> bytes:
 @pytest.fixture(autouse=True)
 def _isolated_state(tmp_path_factory, monkeypatch):
     """Never touch the real ~/.aisb: audit log, config, inventory and sessions live in a temp home per test."""
-    from aisb import config, plugins
+    from aisb import config, ops, plugins
     home = tmp_path_factory.mktemp("aisb-home")
     monkeypatch.setenv("AISB_HOME", str(home))
     monkeypatch.setenv("AISB_CONFIG", str(home / "config.toml"))
@@ -192,8 +192,13 @@ def _isolated_state(tmp_path_factory, monkeypatch):
         monkeypatch.delenv(var, raising=False)
     config.reset()
     plugins.reset()
+    known = set(ops._REGISTRY), set(ops._RESOURCES)
     yield
     config.reset()
+    for extra in set(ops._REGISTRY) - known[0]:   # resources registered by a test (plugins, toys) never leak
+        del ops._REGISTRY[extra]
+    for extra in set(ops._RESOURCES) - known[1]:
+        del ops._RESOURCES[extra]
 
 
 @pytest.fixture

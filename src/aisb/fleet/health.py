@@ -81,7 +81,8 @@ def assess(vitals: Vitals | None, doctor: Mapping[str, Any] | None, *, error: st
     """Host verdict from vitals and `system doctor` output. `error` = unreachable."""
     if error:
         return Assessment("down", [error[:200]])
-    failing, degraded = [], []
+    failing: list[str] = []
+    degraded: list[str] = []
     for p in (doctor or {}).get("problems", []):
         why = p.get("likely_cause") or (p.get("findings") or ["?"])[0].split(": ", 1)[-1]
         (failing if p["verdict"] == "failing" else degraded).append(f"container {p['container']} {p['verdict']}: {why}")
@@ -99,7 +100,7 @@ def assess(vitals: Vitals | None, doctor: Mapping[str, Any] | None, *, error: st
 
 def changes(prev: Mapping[str, Mapping[str, Any]], cur: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Diff two {host: {"verdict", "reasons"}} snapshots into events (worse/better/new reasons/resolved)."""
-    events = []
+    events: list[dict[str, Any]] = []
     for host in sorted(prev.keys() | cur.keys()):
         a, b = prev.get(host), cur.get(host)
         if a == b:

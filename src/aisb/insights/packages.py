@@ -47,7 +47,8 @@ class Package:
 def parse(path: str, data: bytes) -> list[Package]:
     text = data.decode(errors="replace")
     if path == "lib/apk/db/installed":
-        out, cur = [], {}
+        out: list[Package] = []
+        cur: dict[str, str] = {}
         for line in text.splitlines() + [""]:
             if not line:
                 if "P" in cur:
@@ -175,7 +176,8 @@ def diff(a: Inventory, b: Inventory, *, top: int = 20) -> dict[str, Any]:
         by_dir[top_dir] = by_dir.get(top_dir, 0) + delta(p)
     pa = {(p.ecosystem, p.name): p.version for p in a.packages}
     pb = {(p.ecosystem, p.name): p.version for p in b.packages}
-    ups, downs = [], []
+    ups: list[dict[str, str]] = []
+    downs: list[dict[str, str]] = []
     for k in sorted(pa.keys() & pb.keys()):
         if pa[k] != pb[k]:
             (ups if _vkey(pb[k]) > _vkey(pa[k]) else downs).append(
@@ -195,7 +197,7 @@ def diff(a: Inventory, b: Inventory, *, top: int = 20) -> dict[str, Any]:
 
 
 def config_diff(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
-    out = {}
+    out: dict[str, Any] = {}
     for key in ("Env", "Cmd", "Entrypoint", "User", "WorkingDir", "ExposedPorts", "Labels", "Volumes"):
         x, y = a.get(key), b.get(key)
         if x != y:

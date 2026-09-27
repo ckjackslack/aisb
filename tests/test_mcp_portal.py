@@ -4,7 +4,6 @@ import http.client
 import json
 import textwrap
 import threading
-from pathlib import Path
 
 import pytest
 

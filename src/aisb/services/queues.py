@@ -144,9 +144,11 @@ class RabbitMQ(Adapter):
     def peek(self, queue: str, *, vhost: str, limit: int) -> list[dict[str, Any]]:
         """Management API get with requeue: messages go back to the queue (they get the redelivered flag)."""
         port = 15672
-        host, hport = (("127.0.0.1", self.t.published[port][1]) if port in self.t.published
-                       else (self.t.ips[0], port) if self.t.ips else (None, None))
-        if host is None:
+        if port in self.t.published:
+            host, hport = "127.0.0.1", self.t.published[port][1]
+        elif self.t.ips:
+            host, hport = self.t.ips[0], port
+        else:
             raise ServiceError("rabbitmq: management API not reachable (use a *-management image)")
         host, hport = self.ctr.t.reach(host, hport)
         conn = http.client.HTTPConnection(host, hport, timeout=10)
@@ -198,9 +200,11 @@ class Search(Adapter):
 
     def request(self, method: str, path: str, body: Any = None) -> Any:
         port = 9200
-        host, hport = (("127.0.0.1", self.t.published[port][1]) if port in self.t.published
-                       else (self.t.ips[0], port) if self.t.ips else (None, None))
-        if host is None:
+        if port in self.t.published:
+            host, hport = "127.0.0.1", self.t.published[port][1]
+        elif self.t.ips:
+            host, hport = self.t.ips[0], port
+        else:
             raise ServiceError("elasticsearch: port 9200 is neither published nor reachable by IP")
         host, hport = self.ctr.t.reach(host, hport)
         headers = {"Content-Type": "application/json"}

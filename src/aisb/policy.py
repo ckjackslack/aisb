@@ -130,7 +130,7 @@ def in_window(window: Mapping[str, Any], now: dt.datetime) -> bool:
 
 def check(rules: Iterable[Mapping[str, Any]], op: str, tier: str, kwargs: Mapping[str, Any], ctx: Ctx,
           now: dt.datetime | None = None) -> list[Violation]:
-    now = now or dt.datetime.now(dt.timezone.utc)
+    now = now or dt.datetime.now(dt.UTC)
     out: list[Violation] = []
     for i, rule in enumerate(rules):
         name, mode = str(rule.get("name") or f"rule-{i + 1}"), str(rule.get("mode") or "deny")

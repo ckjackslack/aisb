@@ -141,7 +141,8 @@ def _attempt(host: Host, fn: Callable[[Host], Any], retries: int, host_timeout: 
         if host_timeout:
             box: list[HostResult] = []
             ctx = contextvars.copy_context()
-            worker = threading.Thread(target=lambda: box.append(ctx.run(_one, host, fn)), daemon=True)
+            # bind this attempt's box: a timed-out thread may finish later and must not fill the next attempt's
+            worker = threading.Thread(target=lambda box=box, ctx=ctx: box.append(ctx.run(_one, host, fn)), daemon=True)
             worker.start()
             worker.join(max(0.0, deadline - time.monotonic()) if deadline else None)
             res = box[0] if box else HostResult(host.name, False, int(host_timeout * 1000),

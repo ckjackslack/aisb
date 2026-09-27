@@ -16,6 +16,7 @@ from aisb.cli import EXIT_CONFIRM, EXIT_OK, EXIT_UNMET, main
 from aisb.fleet import health, runner
 from aisb.fleet.inventory import Host, Inventory
 from aisb.fleet.ssh import Ssh, Unreachable
+
 from conftest import FakeDaemon, Reply
 
 

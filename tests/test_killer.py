@@ -8,11 +8,11 @@ from typing import Any
 import pytest
 
 from aisb.insights import envcontract as env
-from aisb.insights import graph, incident, packages, rightsize as rs, traffic
+from aisb.insights import graph, incident, packages, traffic
+from aisb.insights import rightsize as rs
 from aisb.rootfs import relative
 from aisb.services import advise, seed, subset
 from aisb.services.sql import SQL, Relations, Result
-
 
 # --- graph -------------------------------------------------------------------------------------
 

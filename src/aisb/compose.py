@@ -21,7 +21,9 @@ _IGNORED = {"networks", "container_name", "logging", "stop_grace_period", "stop_
 def _env(value: Any, base: Path, env_file: Any, notes: list[str], svc: str) -> dict[str, str]:
     out: dict[str, str] = {}
     for f in [env_file] if isinstance(env_file, (str, dict)) else env_file or []:
-        path = f.get("path") if isinstance(f, dict) else f
+        path = str((f.get("path") if isinstance(f, dict) else f) or "")
+        if not path:
+            continue
         p = (base / path).resolve()
         if not p.exists():
             notes.append(f"{svc}: env_file {path} not found; its variables are missing")
@@ -29,11 +31,12 @@ def _env(value: Any, base: Path, env_file: Any, notes: list[str], svc: str) -> d
         for line in p.read_text().splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
-                k, _, v = line.removeprefix("export ").partition("=")
-                out[k.strip()] = v.strip().strip("'\"")
+                key, _, val = line.removeprefix("export ").partition("=")
+                out[key.strip()] = val.strip().strip("'\"")
     items = value.items() if isinstance(value, Mapping) else \
         [(e.partition("=")[0], e.partition("=")[2] if "=" in e else None) for e in value or []]
-    for k, v in items:
+    for k, raw in items:
+        v = raw
         if v is None:
             if (host := os.environ.get(k)) is None:
                 notes.append(f"{svc}: {k} takes its value from the environment at deploy time; "

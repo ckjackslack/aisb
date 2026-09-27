@@ -439,7 +439,7 @@ class Containers(Resource, name="containers"):
         uses, scanned = [], []
         for root in [*dirs, *dict.fromkeys(files)]:
             try:
-                for m, rel, data in walk(self.t, ref, root, budget_mib=budget_mib,
+                for _m, rel, data in walk(self.t, ref, root, budget_mib=budget_mib,
                                          want=lambda r, mm: mm.size <= 512 * 1024 and (ec.is_source(r) or r == "")):
                     if data is not None and b"\0" not in data[:1024]:
                         path = root.rstrip("/") + ("/" + rel if rel else "")
@@ -613,6 +613,7 @@ class Containers(Resource, name="containers"):
         if s_ref is not None:
             data = self.t.raw("GET", f"/containers/{q(s_ref)}/archive", query={"path": s_path})
             return {"copied": untar(data, d_path) if data else [], "dest": d_path}
+        assert d_ref is not None  # exactly one side is a container, and it isn't the source
         self.t.json("PUT", f"/containers/{q(d_ref)}/archive", query={"path": d_path},
                     data=tar_path(s_path), content_type="application/x-tar")
         return {"copied": [s_path], "dest": dest}

@@ -84,15 +84,15 @@ class AisbConnector(BaseConnector):
         self.client.transport.json("PUT", f"/containers/{q(self.ref)}/archive", query={"path": parent or "/"},
                                    data=_tar_one(base, data), content_type="application/x-tar")
 
-    def run_shell_command(self, command, print_output=False, print_input=False, **arguments):  # type: ignore[override]
+    def run_shell_command(self, command, print_output=False, print_input=False, **arguments):
         control = extract_control_arguments(arguments)
         stdin, ok_codes = control.get("_stdin"), control.get("_success_exit_codes") or [0]
         raw = make_unix_command_for_host(self.state, self.host, command, **arguments).get_raw_value()
         cleanup = None
         if stdin is not None:  # exec has no stdin here: stage it as a file and redirect
-            lines = [stdin] if isinstance(stdin, str) else list(stdin)
+            chunks = [stdin] if isinstance(stdin, str) else list(stdin)
             cleanup = f"/tmp/.aisb-stdin-{uuid.uuid4().hex[:8]}"
-            self._put(cleanup, "".join(line if line.endswith("\n") else line + "\n" for line in lines).encode())
+            self._put(cleanup, "".join(c if c.endswith("\n") else c + "\n" for c in chunks).encode())
             raw = f"( {raw} ) < {cleanup}; rc=$?; rm -f {cleanup}; exit $rc"
         if print_input:
             echo(f"{self.host.print_prefix}>>> {raw}", err=True)
@@ -107,7 +107,7 @@ class AisbConnector(BaseConnector):
                 echo(f"{self.host.print_prefix}{line.line}", err=line.buffer_name == "stderr")
         return res.code in ok_codes, CommandOutput(lines)
 
-    def put_file(self, filename_or_io, remote_filename, remote_temp_filename=None, print_output=False,  # type: ignore[override]
+    def put_file(self, filename_or_io, remote_filename, remote_temp_filename=None, print_output=False,
                  print_input=False, **arguments) -> bool:
         with get_file_io(filename_or_io) as f:
             data = f.read()
@@ -116,7 +116,7 @@ class AisbConnector(BaseConnector):
             echo(f"{self.host.print_prefix}file uploaded to container: {remote_filename}", err=True)
         return True
 
-    def get_file(self, remote_filename, filename_or_io, remote_temp_filename=None, print_output=False,  # type: ignore[override]
+    def get_file(self, remote_filename, filename_or_io, remote_temp_filename=None, print_output=False,
                  print_input=False, **arguments) -> bool:
         data = read_file(self.client.transport, self.ref, remote_filename)
         if data is None:

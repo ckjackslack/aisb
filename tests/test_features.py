@@ -14,6 +14,7 @@ from aisb.mcp import Server
 from aisb.ops import Tier
 from aisb.services.queues import parse_kafka_table
 from aisb.services.sql import diff_schema
+
 from conftest import Reply, frame, tar_of
 
 

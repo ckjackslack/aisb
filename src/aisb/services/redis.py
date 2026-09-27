@@ -96,7 +96,8 @@ class Redis(Adapter):
     def cli(self, *args: str, check: bool = True) -> Any:
         last = None
         for binary in ("redis-cli", "valkey-cli", "keydb-cli"):
-            res = self.run([binary, *(["--user", self.user()] if self.user() else []), *args],
+            user = self.user()
+            res = self.run([binary, *(["--user", user] if user else []), *args],
                            env={"REDISCLI_AUTH": self.password()}, check=False)
             if res.code in (126, 127) or "executable file not found" in res.stdout + res.stderr:
                 last = res

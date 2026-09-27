@@ -17,7 +17,7 @@ COUNTRIES = (("PT", "Portugal"), ("NO", "Norway"), ("JP", "Japan"), ("US", "Unit
              ("PE", "Peru"), ("EE", "Estonia"), ("VN", "Vietnam"), ("AU", "Australia"), ("CA", "Canada"))
 WORDS = ("amber", "basalt", "cobalt", "delta", "ember", "fjord", "glacier", "harbor", "indigo", "juniper", "kelp",
          "lumen", "meadow", "nebula", "onyx", "prairie", "quartz", "reef", "sierra", "tundra")
-NOW = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+NOW = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
 
 
 @dataclass(slots=True)
@@ -193,9 +193,9 @@ class Generator:
         if t == "numeric":
             scale = col.scale if col.scale is not None else 2
             top = 10 ** ((col.precision or 10) - scale) - 1
-            lo = col.minimum if col.minimum is not None else 0
-            hi = min(top, 999 if any(k in name for k in ("price", "amount", "total", "cost", "fee")) else top)
-            num = Decimal(str(round(r.uniform(float(lo), float(max(lo, hi))), scale)))
+            low = float(col.minimum) if col.minimum is not None else 0.0
+            high = float(min(top, 999 if any(k in name for k in ("price", "amount", "total", "cost", "fee")) else top))
+            num = Decimal(str(round(r.uniform(low, max(low, high)), scale)))
             return str(num.quantize(Decimal(1).scaleb(-scale)))
         if t == "float":
             return round(r.uniform(-90, 90), 6) if "lat" in name else round(r.uniform(-180, 180), 6) if "lng" in name \
@@ -247,8 +247,8 @@ def seed(db: SQL, rel: Relations, metas: dict[str, TableMeta], *, rows: int, tab
                 for fk in {id(f): f for f in fk_cols.values()}.values():
                     pool = parents.get(fk.name) or []
                     pick = gen.rng.choice(pool) if pool else None  # empty (e.g. self-reference): NULL
-                    for pos, c in enumerate(fk.columns):
-                        row[c] = pick[pos] if pick else None
+                    for pos, fk_col in enumerate(fk.columns):
+                        row[fk_col] = pick[pos] if pick else None
                 for c in cols:
                     if c.name not in row:
                         in_unique = any(c.name in u for u in uniques)

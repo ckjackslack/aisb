@@ -4,16 +4,16 @@ from .capsule import Capsule
 from .chaos import Chaos
 from .containers import Containers
 from .fleet import Fleet
-from .governance import Audit, Config, Policy
-from .notifyops import NotifyOps
-from .runbook import RunbookOps
 from .fs import Fs
+from .governance import Audit, Config, Policy
 from .http import Http
 from .images import Images
 from .net import Net
 from .networks import Networks
-from .session import Session
+from .notifyops import NotifyOps
+from .runbook import RunbookOps
 from .services import Db, KafkaOps, MongoOps, RabbitOps, RedisOps, SearchOps, Svc
+from .session import Session
 from .stack import StackOps
 from .system import System
 from .volumes import Volumes

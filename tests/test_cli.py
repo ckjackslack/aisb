@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from aisb.cli import EXIT_CONFIRM, EXIT_DOCKER, EXIT_OK, EXIT_USAGE, main
+
 from conftest import Reply, frame
 
 SRC = Path(__file__).parents[1] / "src"

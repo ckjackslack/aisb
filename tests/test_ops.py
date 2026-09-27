@@ -5,6 +5,7 @@ import pytest
 
 from aisb import Tier, get_op, invoke, registry
 from aisb.ops import render_markdown, usage
+
 from conftest import Reply
 
 DOCS = Path(__file__).parents[1] / ".claude/skills/docker/references/commands.md"

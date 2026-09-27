@@ -7,10 +7,10 @@ from collections.abc import Sequence
 from typing import Annotated, Any, Literal
 
 from .. import notify as notify_mod
+from ..errors import NotFound
 from ..fleet import health, metrics, runner
 from ..fleet.inventory import Host, Inventory
 from ..ops import Op, Resource, Tier, invoke, jsonable, op
-from ..errors import NotFound
 from ..streams import iter_jsonl
 from ..util import clip, kv, q
 
@@ -143,7 +143,8 @@ class Fleet(Resource, name="fleet"):
         found = parser(text, user=user, public=public) if source == "aws" else parser(text)
         found = sources.select(found, match)
         inv = Inventory.load(inventory)
-        added, updated = [], []
+        added: list[str] = []
+        updated: list[str] = []
         for h in found:
             h = dc_replace(h, groups=tuple(dict.fromkeys((*h.groups, *(group or ())))), labels={**h.labels, **kv(label)})
             (updated if h.name in inv.hosts else added).append(h.name)
@@ -217,7 +218,7 @@ class Fleet(Resource, name="fleet"):
         rows = self._status(Inventory.load(inventory).select(target), doctor=doctor, tail=tail, parallel=parallel,
                             retries=retries, host_timeout=host_timeout)
         summary = {v: sum(r["verdict"] == v for r in rows) for v in health.RANK}
-        out = {"summary": summary, "hosts": rows,
+        out: dict[str, Any] = {"summary": summary, "hosts": rows,
                "next": [f"aisb fleet doctor {r['host']}" for r in rows if r["verdict"] in ("failing", "degraded")][:5]}
         if record:
             out["recorded"] = metrics.record(rows)
@@ -382,9 +383,10 @@ class Fleet(Resource, name="fleet"):
                         msgs = [m.get("stream", "").strip() for m in iter_jsonl(d.transport.stream(
                             "POST", "/images/load", data=body, content_type="application/x-tar", timeout=None))]
                     loaded_id = next((m.split(": ", 1)[1] for m in msgs if m.startswith("Loaded image ID:")), None)
-                    for t in tags if loaded_id else ():  # exported by ID: re-apply the local tags
-                        repo, _, tag = t.rpartition(":")
-                        d.transport.json("POST", f"/images/{q(loaded_id)}/tag", query={"repo": repo, "tag": tag})
+                    if loaded_id:  # exported by ID: re-apply the local tags
+                        for t in tags:
+                            repo, _, tag = t.rpartition(":")
+                            d.transport.json("POST", f"/images/{q(loaded_id)}/tag", query={"repo": repo, "tag": tag})
                     if not present(d):
                         raise ValueError(f"load finished but {image} is not there: {'; '.join(msgs)[-200:]}")
                 return {"action": "loaded", "bytes": size}
@@ -556,7 +558,7 @@ class Fleet(Resource, name="fleet"):
             mine = {a.stack.name for a in want[h.name]}
             stacks = {a.stack.name: plan(a.stack, [r for r in rows if (r.get("Labels") or {}).get(STACK_KEY) == a.stack.name])
                       for a in want[h.name]}
-            extra = sorted({(r.get("Labels") or {}).get(STACK_KEY) for r in rows} - mine - {None})
+            extra = sorted({n for r in rows if (n := (r.get("Labels") or {}).get(STACK_KEY)) and n not in mine})
             converged = all(not (p["missing"] or p["stopped"] or p["drift"]) for p in stacks.values())
             return {"converged": converged, "stacks": stacks, **({"unassigned_stacks": extra} if extra else {})}
         out = self._fan(hosts, one, None, parallel=parallel, retries=retries, host_timeout=host_timeout)
@@ -746,7 +748,7 @@ def _identity(inspect: dict[str, Any]) -> tuple[Any, ...]:
 def _pyinfra(inv: Inventory, hosts: list[Host]) -> str:
     def entry(h: Host) -> str:
         if not h.ssh:
-            return f"('@local', {{}})" if h.transport == "local" else ""
+            return "('@local', {})" if h.transport == "local" else ""
         user, _, addr = h.ssh.rpartition("@")
         data = {"ssh_hostname": addr, **({"ssh_user": user} if user else {}), **({"ssh_port": h.port} if h.port else {}),
                 **({"ssh_key": h.key} if h.key else {}), **({"aisb_labels": dict(h.labels)} if h.labels else {})}

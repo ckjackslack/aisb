@@ -7,13 +7,13 @@ import time
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar
 
+from ..models import RunSpec
 from ..ops import Resource, Tier, op
 from ..services import REGISTRY, SQL, Adapter, ServiceError, SQLite, Target
 from ..services.fmt import infer, render, shape
 from ..services.mongo import Mongo
 from ..services.queues import Kafka, RabbitMQ, Search
 from ..services.redis import Redis
-from ..models import RunSpec
 from ..services.sql import diff_schema, gzip_sink
 from ..util import q
 from .containers import Containers
@@ -44,7 +44,7 @@ def adapter(res: Resource, ref: str, want: type[A] = Adapter, *, engine: str | N
         raise ValueError(f"{ref!r} runs {cls.kind}, which this command does not support")
     if not t.running:
         raise ServiceError(f"{ref!r} is not running; start it first (aisb containers start {ref})")
-    return cls(ctr, t)  # type: ignore[return-value]
+    return cls(ctr, t)
 
 
 def sql_adapter(res: Resource, ref: str, engine: str | None, path: str | None) -> SQL:
@@ -82,7 +82,7 @@ class Svc(Resource, name="svc"):
     def url(self, ref: Ref, *, reveal: Annotated[bool, "include the password (it is printed!)"] = False,
             hostname: Annotated[str, "host name to use in the URL"] = "127.0.0.1") -> dict[str, Any]:
         """Connection URL for host tools (psql, redis-cli, DBeaver, app config) via the published port."""
-        a = adapter(self, ref)
+        a: Adapter = adapter(self, ref)
         return {**a.connection_info(reveal=reveal), "url": a.url(reveal=reveal, host=hostname)}
 
     @op(Tier.READ)
@@ -129,7 +129,7 @@ class Svc(Resource, name="svc"):
     @op(Tier.READ)
     def stats(self, ref: Ref) -> Any:
         """Service vitals: running queries/blockers (SQL), memory/hit rate (Redis), ops/connections (Mongo)."""
-        a = adapter(self, ref)
+        a: Adapter = adapter(self, ref)
         fn = getattr(a, "activity", None) or getattr(a, "stats", None)
         if fn is None:
             raise ValueError(f"{a.kind} has no stats support")
@@ -138,22 +138,22 @@ class Svc(Resource, name="svc"):
     @op(Tier.READ)
     def check(self, ref: Ref) -> dict[str, Any]:
         """Validate the service configuration (nginx -t, httpd -t, caddy validate, haproxy -c, pg_file_settings)."""
-        a = adapter(self, ref)
+        a: Adapter = adapter(self, ref)
         if not hasattr(a, "check"):
             raise ValueError(f"{a.kind} has no config check")
-        return {"kind": a.kind, **a.check()}  # type: ignore[attr-defined]
+        return {"kind": a.kind, **a.check()}
 
     @op(Tier.MUTATE)
     def reload(self, ref: Ref, *, force: Annotated[bool, "skip the config check"] = False) -> dict[str, Any]:
         """Validate the config, then reload gracefully. A failing check aborts the reload."""
-        a = adapter(self, ref)
+        a: Adapter = adapter(self, ref)
         if not hasattr(a, "reload"):
             raise ValueError(f"{a.kind} has no graceful reload")
         if not force and hasattr(a, "check"):
-            result = a.check()  # type: ignore[attr-defined]
+            result = a.check()
             if not result["ok"] and not self.t.planning:
                 return {"ok": False, "reloaded": False, "reason": "config check failed", "check": result}
-        return {"ok": True, "kind": a.kind, **a.reload()}  # type: ignore[attr-defined]
+        return {"ok": True, "kind": a.kind, **a.reload()}
 
 
 class Db(Resource, name="db"):
@@ -383,7 +383,7 @@ class Db(Resource, name="db"):
             cdb.query("ANALYZE", readonly=False, database=database, seconds=600)
             base_ms, base_plan = measure()
             existing = {row[0] for row in cdb.query("select indexdef from pg_indexes", database=database).rows}
-            tried = []
+            tried: list[dict[str, Any]] = []
             for i, cand in enumerate(adv.candidates(base_plan)[:5]):
                 lead = f"({', '.join(cand.columns)})"
                 if any(f"USING btree {lead}" in d for d in existing):

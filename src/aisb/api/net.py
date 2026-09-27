@@ -67,9 +67,10 @@ class Net(Resource, name="net"):
             from .. import stack as stk
             s = stk.load(stack)
             name_of = {svc.container: svc.name for svc in s.services.values()}
-            seen = {(name_of.get(e["from"]), name_of.get(e["to"])) for e in g["edges"]}
+            seen = {(a, b) for e in g["edges"]
+                    if (a := name_of.get(e["from"])) is not None and (b := name_of.get(e["to"])) is not None}
             declared = {(svc.name, d) for svc in s.services.values() for d in svc.depends_on}
-            g["undeclared_dependencies"] = sorted(f"{a} -> {b}" for a, b in seen - declared if a and b)
+            g["undeclared_dependencies"] = sorted(f"{a} -> {b}" for a, b in seen - declared)
             g["unused_declared"] = sorted(f"{a} -> {b}" for a, b in declared - seen)
         if format == "mermaid":
             return {"output": graph.mermaid(g), "edges": len(g["edges"])}
@@ -123,8 +124,8 @@ class Net(Resource, name="net"):
         dst_name = (d.get("Name") or dst).lstrip("/") if d else dst  # container name, for exec
 
         if d:
-            sn = set(((s.get("NetworkSettings") or {}).get("Networks") or {}))
-            dn = set(((d.get("NetworkSettings") or {}).get("Networks") or {}))
+            sn = set((s.get("NetworkSettings") or {}).get("Networks") or {})
+            dn = set((d.get("NetworkSettings") or {}).get("Networks") or {})
             shared = sorted(sn & dn)
             only_default = shared == ["bridge"]
             steps.append({"step": "shared-network", "ok": bool(shared) and not only_default, "networks": shared,
@@ -186,6 +187,8 @@ class Net(Resource, name="net"):
                 der, version, cipher = tls_sock.getpeercert(binary_form=True), tls_sock.version(), tls_sock.cipher()
         except (OSError, ssl.SSLError) as e:
             return {"ok": False, "reason": f"TLS handshake with {host}:{hport} failed: {e}", "via": via}
+        if not der:
+            return {"ok": False, "reason": f"{host}:{hport} sent no certificate", "via": via}
         with tempfile.NamedTemporaryFile("w", suffix=".pem") as f:
             f.write(ssl.DER_cert_to_PEM_cert(der))
             f.flush()
@@ -200,8 +203,8 @@ class Net(Resource, name="net"):
         except (OSError, ssl.SSLError) as e:
             verified, verify_error = False, str(e)
         name = lambda seq: ", ".join(f"{k}={v}" for rdn in seq for k, v in rdn)  # noqa: E731
-        not_after = dt.datetime.fromtimestamp(ssl.cert_time_to_seconds(cert["notAfter"]), dt.timezone.utc)
-        days = round((not_after - dt.datetime.now(dt.timezone.utc)).total_seconds() / 86400, 1)
+        not_after = dt.datetime.fromtimestamp(ssl.cert_time_to_seconds(cert["notAfter"]), dt.UTC)
+        days = round((not_after - dt.datetime.now(dt.UTC)).total_seconds() / 86400, 1)
         return {"container": ref, "endpoint": f"{host}:{hport}", "via": via, "protocol": version,
                 "cipher": cipher[0] if cipher else None, "subject": name(cert.get("subject", ())),
                 "issuer": name(cert.get("issuer", ())), "san": [v for _, v in cert.get("subjectAltName", ())],

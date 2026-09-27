@@ -47,7 +47,7 @@ def analyze(signals: Iterable[Signal], depends: Mapping[str, set[str]], *,
             roots.append(c)
     if not depends and roots:
         roots = roots[:1]  # without topology only the earliest failure is a defensible candidate
-    report: dict[str, Any] = {"failing": sorted(first_bad, key=first_bad.get), "evidence": evidence}
+    report: dict[str, Any] = {"failing": sorted(first_bad, key=lambda c: first_bad[c]), "evidence": evidence}
     if not roots:
         degraded = sorted({s.container for s in sigs if s.severity == "warning"})
         report.update(summary="no failure found in the window" + (f"; degraded: {', '.join(degraded)}" if degraded else ""),
@@ -55,7 +55,7 @@ def analyze(signals: Iterable[Signal], depends: Mapping[str, set[str]], *,
     else:
         root = roots[0]
         downstream = _closure(root, rdeps) if depends else set(first_bad) - {root}
-        blast = sorted((c for c in downstream if c in first_bad and first_bad[c] >= first_bad[root]), key=first_bad.get)
+        blast = sorted((c for c in downstream if c in first_bad and first_bad[c] >= first_bad[root]), key=lambda c: first_bad[c])
         first = next(s for s in sigs if s.container == root and s.severity == "critical")
         cause = (likely_causes or {}).get(root)
         report.update(

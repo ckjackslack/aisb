@@ -8,6 +8,7 @@ import pytest
 
 from aisb import config, runbooks
 from aisb.cli import EXIT_CONFIRM, EXIT_OK, EXIT_UNMET, main
+
 from conftest import Reply
 
 

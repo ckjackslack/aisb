@@ -280,7 +280,7 @@ class Postgres(SQL):
             "join pg_namespace n on n.oid = c.relnamespace where c.relkind = 'r' and a.attnum > 0 and not a.attisdropped "
             f"and n.nspname {self._USER_SCHEMAS.format(col='n.nspname')} and pg_get_serial_sequence("
             "quote_ident(n.nspname) || '.' || quote_ident(c.relname), a.attname) is not null", database=database)
-        return [tuple(row) for row in r.rows]  # type: ignore[misc]
+        return [(str(t), str(c), str(s)) for t, c, s in r.rows]
 
     def schema(self, database: str | None = None) -> dict[str, dict[str, Any]]:
         cols = self.query(

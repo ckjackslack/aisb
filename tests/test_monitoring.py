@@ -18,7 +18,8 @@ from aisb import config, notify
 from aisb.cli import EXIT_OK, main
 from aisb.exporter import Collector, Exposition, fleet_metrics, serve
 from aisb.fleet import metrics
-from conftest import FakeDaemon, Reply
+
+from conftest import FakeDaemon
 
 DAY = 86400
 

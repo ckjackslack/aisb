@@ -113,7 +113,7 @@ def test_policy_rules(rule, op, tier, kwargs, c, blocked):
     ({"hours": "22-06"}, dt.datetime(2026, 9, 28, 12), False),
 ])
 def test_windows(window, when, inside):
-    assert in_window(window, when.replace(tzinfo=dt.timezone.utc)) is inside
+    assert in_window(window, when.replace(tzinfo=dt.UTC)) is inside
 
 
 @pytest.mark.parametrize(("image", "tag"), [("nginx", "latest"), ("nginx:1.2", "1.2"), ("reg:5000/app", "latest"),

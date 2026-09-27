@@ -5,9 +5,8 @@ import threading
 import time
 from typing import Annotated, Any, Literal
 
-from ..errors import DockerError, NotFound
-
 from .. import insights
+from ..errors import DockerError, NotFound
 from ..insights import snapshot as snap
 from ..ops import Resource, Tier, op
 from ..streams import demux, iter_jsonl
@@ -188,7 +187,7 @@ class System(Resource, name="system"):
             rows = self.t.json("GET", "/containers/json", query={
                 "all": True, "filters": {"label": [MANAGED]} if managed else None}) or []
             states = {(r.get("Names") or ["?"])[0].lstrip("/"): r.get("State", "") for r in rows}
-            out = {c: ("healthy", (), states.get(c, "")) for c in rep["healthy"]}
+            out: dict[str, tuple[str, tuple[str, ...], str]] = {c: ("healthy", (), states.get(c, "")) for c in rep["healthy"]}
             for p in rep["problems"]:
                 out[p["container"]] = (p["verdict"], tuple(sorted(f.split(":")[1] for f in p["findings"])),
                                        states.get(p["container"], ""))
@@ -529,7 +528,7 @@ class System(Resource, name="system"):
                                          "NetworksDeleted")
         if volumes:
             # API >= 1.42 prunes only anonymous volumes unless all=true; aisb-managed named volumes count too.
-            f = {**label, "all": ["true"]} if managed else None
-            out["volumes"] = _reclaimed(self.t.json("POST", "/volumes/prune", query={"filters": f}),
+            vf = {**label, "all": ["true"]} if managed else None
+            out["volumes"] = _reclaimed(self.t.json("POST", "/volumes/prune", query={"filters": vf}),
                                         "VolumesDeleted")
         return out

@@ -11,6 +11,7 @@ from aisb.cli import EXIT_CONFIRM, EXIT_OK, main
 from aisb.client import Docker
 from aisb.ops import Tier
 from aisb.portal import Portal
+
 from conftest import FakeDaemon, Reply
 
 

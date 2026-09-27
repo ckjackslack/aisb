@@ -101,7 +101,7 @@ def report(owners: Sequence[Mapping[str, str]], ids_per_query: Sequence[Iterable
            details: Mapping[str, Mapping[str, Any]], queries_: Sequence[Mapping[str, Any]], *,
            min_severity: str = "low") -> dict[str, Any]:
     floor = SEVERITIES.index(min_severity)
-    findings = []
+    findings: list[dict[str, Any]] = []
     for comp, ids, q in zip(owners, ids_per_query, queries_):
         for vid in ids:
             v = details.get(vid) or {"id": vid}

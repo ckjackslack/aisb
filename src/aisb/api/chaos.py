@@ -137,7 +137,7 @@ class Chaos(Resource, name="chaos"):
                 for f in chosen:
                     self.t.note(chaos=f, service=name, seconds=seconds)
             return {}
-        card = []
+        card: list[dict[str, Any]] = []
         for name in service or s.order:
             for fault in chosen:
                 pre = {m: self.healthy(c)[0] for m, c in members.items()}
@@ -146,9 +146,9 @@ class Chaos(Resource, name="chaos"):
                                  "unhealthy": [m for m, ok in pre.items() if not ok]})
                     continue
                 target = members[name]
-                action = {"pause": lambda: self.pause(target, seconds=seconds),
-                          "disconnect": lambda: self.disconnect(target, seconds=seconds),
-                          "latency": lambda: self.latency(target, ms=300, seconds=seconds)}[fault]
+                action = {"pause": lambda target=target: self.pause(target, seconds=seconds),
+                          "disconnect": lambda target=target: self.disconnect(target, seconds=seconds),
+                          "latency": lambda target=target: self.latency(target, ms=300, seconds=seconds)}[fault]
                 worker = threading.Thread(target=action, daemon=True)
                 worker.start()
                 affected: set[str] = set()

@@ -3,7 +3,7 @@
 import re
 import time
 from collections.abc import Iterable, Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
 
@@ -71,7 +71,7 @@ def to_unix(value: str | int | float, *, now: float | None = None) -> int:
     if v.isdigit():
         return int(v)
     dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-    return int((dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).timestamp())
+    return int((dt if dt.tzinfo else dt.replace(tzinfo=UTC)).timestamp())
 
 
 def docker_time(value: str | None) -> float | None:

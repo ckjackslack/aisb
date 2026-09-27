@@ -5,6 +5,7 @@ import pytest
 
 from aisb.errors import APIError
 from aisb.streams import Stream, decode_output, demux, iter_jsonl, tar_context, tar_path, untar
+
 from conftest import frame
 
 PAYLOAD = frame(1, b"hello ") + frame(2, b"oops\n") + frame(1, b"world\n")

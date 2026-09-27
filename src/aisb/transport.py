@@ -215,11 +215,11 @@ class Transport:
             conn.close()
 
     def _req(self, method: str, path: str, query: Mapping[str, Any] | None, body: Any,
-             data: bytes | None, content_type: str | None) -> Request:
+             data: bytes | BinaryIO | None, content_type: str | None) -> Request:
         return Request(method, path, query or {}, body, data, content_type)
 
     def json(self, method: str, path: str, *, query: Mapping[str, Any] | None = None, body: Any = None,
-             data: bytes | None = None, content_type: str | None = None, timeout: Timeout = ...) -> Any:
+             data: bytes | BinaryIO | None = None, content_type: str | None = None, timeout: Timeout = ...) -> Any:
         req = self._req(method, path, query, body, data, content_type)
         if self._intercept(req):
             return {"Id": DRY_ID}
@@ -233,7 +233,7 @@ class Transport:
             return raw.decode(errors="replace")
 
     def raw(self, method: str, path: str, *, query: Mapping[str, Any] | None = None, body: Any = None,
-            data: bytes | None = None, content_type: str | None = None, timeout: Timeout = ...) -> bytes:
+            data: bytes | BinaryIO | None = None, content_type: str | None = None, timeout: Timeout = ...) -> bytes:
         req = self._req(method, path, query, body, data, content_type)
         if self._intercept(req):
             return b""
@@ -247,7 +247,7 @@ class Transport:
             return {k.lower(): v for k, v in resp.getheaders()}
 
     def stream(self, method: str, path: str, *, query: Mapping[str, Any] | None = None, body: Any = None,
-               data: bytes | None = None, content_type: str | None = None, timeout: Timeout = ...) -> Iterator[bytes]:
+               data: bytes | BinaryIO | None = None, content_type: str | None = None, timeout: Timeout = ...) -> Iterator[bytes]:
         req = self._req(method, path, query, body, data, content_type)
         if self._intercept(req):
             return iter(())

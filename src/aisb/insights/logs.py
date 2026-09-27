@@ -17,7 +17,7 @@ _MASKS = (
     (re.compile(r"\b0x[0-9a-f]+\b|\b(?=[0-9a-f]*\d)[0-9a-f]{12,}\b", re.I), "<hex>"),
     (re.compile(r"(?<![\w<])[-+]?\d+(?:\.\d+)?(?:ms|us|ns|s|m|h|[kmg]i?b|b|%)?(?![\w>])", re.I), "<n>"),
 )
-_LEVELS = (
+_LEVELS: tuple[tuple[Level, re.Pattern[str]], ...] = (
     ("error", re.compile(r"\b(?:fatal|critical|crit|panic|error|err|exception|failed|failure)\b|^Traceback|^\s+at \S+\(", re.I)),
     ("warn", re.compile(r"\b(?:warn|warning|deprecated)\b", re.I)),
     ("info", re.compile(r"\b(?:info|notice)\b", re.I)),
@@ -43,7 +43,8 @@ def template(line: str) -> str:
 
 
 def level_of(line: str) -> Level:
-    return next((name for name, rx in _LEVELS if rx.search(line)), "other")  # type: ignore[return-value]
+    found: Level = next((name for name, rx in _LEVELS if rx.search(line)), "other")
+    return found
 
 
 _NUM = re.compile(r"[-+]?\d+(?:\.\d+)?")

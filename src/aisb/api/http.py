@@ -120,7 +120,6 @@ class Http(Resource, name="http"):
                image: Annotated[str, "tcpdump mode: toolbox image"] = "nicolaka/netshoot:v0.13") -> dict[str, Any]:
         """Record real HTTP exchanges with a container: through a recording reverse proxy, or passively with a
         tcpdump sidecar in its network namespace (pcap parsed on the host). Replay them with `http replay`."""
-        from ..insights import traffic
         path = Path(out).expanduser()
         if via == "tcpdump":
             exchanges = self._record_pcap(ref, seconds=seconds, port=port, image=image, max_body=max_body)

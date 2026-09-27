@@ -10,6 +10,7 @@ import pytest
 
 from aisb.cli import EXIT_OK, EXIT_UNMET, main
 from aisb.insights import remediate as rm
+
 from conftest import FakeDaemon, Reply
 
 MIB = 1 << 20

@@ -19,12 +19,12 @@ class Sock:
 def _addr(hexaddr: str) -> tuple[str, int]:
     hexip, hexport = hexaddr.rsplit(":", 1)
     raw = bytes.fromhex(hexip)
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address
     if len(raw) == 4:
         ip = ipaddress.IPv4Address(raw[::-1])
     else:  # /proc stores IPv6 as four little-endian 32-bit words
-        ip = ipaddress.IPv6Address(b"".join(raw[i:i + 4][::-1] for i in range(0, 16, 4)))
-        if ip.ipv4_mapped:
-            ip = ip.ipv4_mapped
+        v6 = ipaddress.IPv6Address(b"".join(raw[i:i + 4][::-1] for i in range(0, 16, 4)))
+        ip = v6.ipv4_mapped or v6
     return str(ip), int(hexport, 16)
 
 

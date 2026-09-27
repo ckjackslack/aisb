@@ -23,6 +23,28 @@ aisb = "aisb.contrib.pyinfra.connector:AisbConnector"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "I"]
+# E501: a few dense lines (tables, SQL, regexes) read better unwrapped; B905: zip() over ragged inputs is intended
+ignore = ["E501", "B905"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["aisb"]
+known-local-folder = ["conftest"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/aisb"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]

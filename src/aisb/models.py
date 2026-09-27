@@ -183,7 +183,7 @@ class RunSpec:
             if binding:
                 bindings.setdefault(key, []).append(binding)
         binds = [v for v in self.volumes if ":" in v]
-        anonymous = {v: {} for v in self.volumes if ":" not in v}
+        anonymous: dict[str, dict[str, Any]] = {v: {} for v in self.volumes if ":" not in v}
         host = compact({
             "Binds": binds or None,
             "PortBindings": bindings or None,

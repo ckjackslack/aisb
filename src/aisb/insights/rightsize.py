@@ -96,7 +96,9 @@ def recommend(name: str, samples: Sequence[Sample], limits: Limits, *, headroom:
     mem = [s.memory for s in samples]
     cpu = cpu_series(samples)
     span = (samples[-1].t - samples[0].t) if len(samples) > 1 else 0
-    rate = (lambda attr: (getattr(samples[-1], attr) - getattr(samples[0], attr)) / span if span else 0.0)
+
+    def rate(attr: str) -> float:
+        return (getattr(samples[-1], attr) - getattr(samples[0], attr)) / span if span else 0.0
     peak, p95cpu = max(mem, default=0), percentile(cpu, 95)
     rec_mem = max(int(ceil_to(peak * (1 + headroom), 16 * MIB)), MIN_MEMORY)
     rec_cpus = max(ceil_to(p95cpu / 100 * (1 + headroom), 0.25), 0.25)

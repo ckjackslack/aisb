@@ -11,6 +11,7 @@ from aisb.services import REGISTRY, Target
 from aisb.services.fmt import infer, render, shape
 from aisb.services.redis import parse_info
 from aisb.services.sql import lit
+
 from conftest import Reply, frame, tar_of
 
 
@@ -19,7 +20,7 @@ def inspect(name="svc", image="postgres:16", env=(), ports=None, exposed=(), run
         "Name": f"/{name}", "State": {"Running": running, "Status": "running" if running else "exited"},
         "Config": {"Image": image, "Env": list(env), "Cmd": list(cmd), "Tty": False,
                    "ExposedPorts": {f"{p}/tcp": {} for p in exposed}},
-        "NetworkSettings": {"Ports": ports or {}, "Networks": {"bridge": {"IPAddress": ip} for ip in ips}},
+        "NetworkSettings": {"Ports": ports or {}, "Networks": {"bridge": {"IPAddress": ips[-1]}} if ips else {}},
     }
 
 

@@ -12,8 +12,8 @@ from aisb.cli import EXIT_CONFIRM, EXIT_OK, EXIT_UNMET, main
 from aisb.fleet import runner
 from aisb.fleet.inventory import Host
 from aisb.fleet.ssh import Unreachable
-from conftest import FakeDaemon, Reply
 
+from conftest import FakeDaemon, Reply
 
 # --- retries / timeouts -------------------------------------------------------------------------
 

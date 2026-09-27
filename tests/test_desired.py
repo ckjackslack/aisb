@@ -8,12 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from aisb import compose, stack as stk, yamlish
+from aisb import compose, yamlish
+from aisb import stack as stk
 from aisb.cli import EXIT_CONFIRM, EXIT_OK, main
 from aisb.fleet import sources
 from aisb.fleet.inventory import Inventory
-from conftest import FakeDaemon, Reply
 
+from conftest import FakeDaemon, Reply
 
 # --- YAML subset ----------------------------------------------------------------------------------
 

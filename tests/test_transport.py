@@ -2,6 +2,7 @@ import pytest
 
 from aisb import errors
 from aisb.transport import DRY_ID, Endpoint, Request, Transport, resolve_endpoint
+
 from conftest import API, Reply
 
 

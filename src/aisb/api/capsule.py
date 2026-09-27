@@ -112,15 +112,16 @@ class Capsule(Resource, name="capsule"):
              keep_ports: Annotated[bool, "publish the original host ports (may clash)"] = False) -> dict[str, Any]:
         """Recreate a capsule: image (embedded, by digest, or by ref), config, volume contents (into *fresh* volumes),
         then DB schema + sample once the service is ready. Redacted secrets must be supplied with --env."""
-        from .services import Svc, adapter
-        from .services import SQL
+        from .services import SQL, Svc, adapter
         with tarfile.open(Path(file).expanduser(), "r:gz") as tar:
             members = {m.name: m for m in tar.getmembers()}
-            read = lambda n: tar.extractfile(members[n]).read() if n in members else None  # type: ignore[union-attr]  # noqa: E731
+            def read(n: str) -> bytes | None:
+                fh = tar.extractfile(members[n]) if n in members else None
+                return fh.read() if fh else None
             manifest = json.loads(read("manifest.json") or b"{}")
             if manifest.get("aisb_capsule") != VERSION:
                 raise ValueError(f"{file} is not an aisb capsule")
-            spec_d = json.loads(read("spec.json"))
+            spec_d = json.loads(read("spec.json") or b"{}")
             if "image.tar" in members:
                 self.t.json("POST", "/images/load", data=read("image.tar"), content_type="application/x-tar",
                             timeout=None)

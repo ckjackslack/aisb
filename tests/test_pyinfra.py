@@ -10,8 +10,8 @@ import zipfile
 import pytest
 
 from aisb import bundle
-from conftest import Reply, tar_of
 
+from conftest import Reply, tar_of
 
 # --- bundle ----------------------------------------------------------------------------------------
 
@@ -40,7 +40,6 @@ from aisb import stack as stk  # noqa: E402
 from aisb.contrib.pyinfra import command as cmd  # noqa: E402
 from aisb.contrib.pyinfra import facts  # noqa: E402
 from aisb.contrib.pyinfra.operations import _plan  # noqa: E402
-
 
 # --- command building ------------------------------------------------------------------------------
 

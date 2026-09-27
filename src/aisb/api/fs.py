@@ -71,7 +71,7 @@ class Fs(Resource, name="fs"):
              min_size: Annotated[int, "only entries at least this many bytes"] = 0,
              limit: Annotated[int, "max results"] = 200, max_mb: Budget = 512) -> dict[str, Any]:
         """Recursive search by name glob, type and size, like `find`, without needing find in the image."""
-        hits = []
+        hits: list[dict[str, Any]] = []
         truncated = False
         for m, rel, _ in self._members(ref, path, max_mb):
             if not rel:

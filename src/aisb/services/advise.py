@@ -58,13 +58,13 @@ def candidates(plan: dict[str, Any], *, min_removed: int = 100) -> list[Candidat
             for m in _JOIN.finditer(cond):
                 for alias, col in ((m.group(1), m.group(2)), (m.group(3), m.group(4))):
                     scan = by_alias.get(alias)
-                    if scan and _rel(scan) and scan.get("Plan Rows", 0) + scan.get("Actual Rows", 0) > 100:
-                        add(_rel(scan), (col,), f"{kind} probes a seq scan of {scan['Relation Name']} on {col}")
+                    if scan and (rel := _rel(scan)) and scan.get("Plan Rows", 0) + scan.get("Actual Rows", 0) > 100:
+                        add(rel, (col,), f"{kind} probes a seq scan of {scan['Relation Name']} on {col}")
         if kind == "Sort" and n.get("Sort Key"):
             child = (n.get("Plans") or [{}])[0]
-            if child.get("Node Type") == "Seq Scan" and _rel(child):
+            if child.get("Node Type") == "Seq Scan" and (rel := _rel(child)):
                 key = n["Sort Key"][0].split(".")[-1].split(" ")[0].strip('"()')
-                add(_rel(child), (key,), f"sort over a seq scan by {n['Sort Key'][0]}")
+                add(rel, (key,), f"sort over a seq scan by {n['Sort Key'][0]}")
     return list(found.values())
 
 

@@ -2,7 +2,7 @@
 
 import re
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from typing import Any
 
 from .triage import Finding
@@ -212,10 +212,10 @@ _SLIM_RULES: tuple[tuple[str, re.Pattern[str], re.Pattern[str] | None, str], ...
 
 def slim(history: list[Mapping[str, Any]], size: int) -> dict[str, Any]:
     """Rank layers by size and flag common Dockerfile bloat patterns with concrete fixes."""
-    layers = [{"layer": i, "size": int(h.get("size") or h.get("Size") or 0),
+    layers: list[dict[str, Any]] = [{"layer": i, "size": int(h.get("size") or h.get("Size") or 0),
                "created_by": re.sub(r"\s+", " ", str(h.get("created_by") or h.get("CreatedBy") or ""))[:200]}
               for i, h in enumerate(reversed(history))]
-    hints = []
+    hints: list[dict[str, Any]] = []
     for layer in layers:
         cmd = layer["created_by"]
         for code, bad, fixed, fix in _SLIM_RULES:

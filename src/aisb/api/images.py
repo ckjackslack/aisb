@@ -120,7 +120,7 @@ class Images(Resource, name="images"):
             else:
                 refs = tuple(sorted({c.get("Image", "") for c in self.t.json("GET", "/containers/json") or []
                                      if c.get("Image") and not c["Image"].startswith("sha256:")}))
-        out = []
+        out: list[dict[str, Any]] = []
         for ref in dict.fromkeys(refs):
             try:
                 local = self.t.json("GET", f"/images/{q(ref)}/json") or {}

@@ -168,7 +168,10 @@ run = "fleet apply '@web,!@canary' --batch 1 --fail-fast -- stack up {stack}"
 
 Execution details:
 - Destroy steps count as approved by `--yes` on `run`; an `approve` step pauses the run with status `waiting`.
-- Every step can have `when` (a condition on an earlier step's result), `retry`, `continue_on_error` and `timeout`.
+- Every step can have `when` (`always`, `on_failure`, `STEP.ok`, `STEP.failed`), `retry = {times, delay}` and
+  `continue_on_error`.
+- There is no per-step timeout: an in-process op can't be killed safely mid-flight, so bound fleet steps with
+  `--host-timeout` instead.
 - Runs persist in `$AISB_HOME/runbooks/RUN/state.json` and audit with `run_id`.
 
 ## 8. Desired state

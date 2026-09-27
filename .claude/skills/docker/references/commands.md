@@ -244,6 +244,19 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | destroy | destroy | `aisb fleet destroy TARGET [-- COMMAND...] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--batch BATCH] [--fail-fast] [--inventory INVENTORY] [--dry-run] [--yes]` | Run a destroy op on every selected host. Without --yes: each host's plan, exit 3, nothing changed. |
 | shell | mutate | `aisb fleet shell TARGET [-- CMD...] [--sudo] [--seconds SECONDS] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--batch BATCH] [--fail-fast] [--max-bytes MAX_BYTES] [--inventory INVENTORY] [--dry-run]` | Run a command on the machines themselves over SSH (not in containers): `fleet shell @db -- df -h /var`. |
 
+## runbook
+
+| op | tier | usage | summary |
+|---|---|---|---|
+| list | read | `aisb runbook list` | Runbooks found in $AISB_RUNBOOKS (default ./runbooks and ~/.aisb/runbooks). |
+| plan | read | `aisb runbook plan RUNBOOK [--var VAR]...` | Validate and dry-run a runbook: every step's command, per-host plans for changes, policy violations, |
+| run | destroy | `aisb runbook run RUNBOOK [--var VAR]... [--dry-run] [--yes]` | Execute a runbook. Without --yes: the full plan and exit 3 (like every destroy op); with --yes the run |
+| resume | destroy | `aisb runbook resume RUN [--allow-changed] [--dry-run] [--yes]` | Continue a waiting or failed run from its first unfinished step (failed steps are retried). |
+| approve | mutate | `aisb runbook approve RUN [--deny] [--note NOTE] [--resume] [--dry-run]` | Answer the approval a run is waiting for (from the CLI, the portal or an agent with the user's consent). |
+| runs | read | `aisb runbook runs [--limit LIMIT]` | Run history, newest first. |
+| show | read | `aisb runbook show RUN` | One run: every step's status, timing, attempts, result summary or error, and approvals. |
+| pending | read | `aisb runbook pending` | Runs waiting for an approval (what the portal's approvals queue shows). |
+
 ## audit
 
 | op | tier | usage | summary |

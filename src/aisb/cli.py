@@ -78,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     resources.add_parser("mcp", help="run the MCP server over stdio (see `aisb mcp --help`)")
     resources.add_parser("bundle", help="write aisb as one executable .pyz (see `aisb bundle --help`)")
     resources.add_parser("portal", help="local web UI, read-only by default (see `aisb portal --help`)")
+    resources.add_parser("exporter", help="Prometheus metrics endpoint (see `aisb exporter --help`)")
     return root
 
 

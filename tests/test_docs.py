@@ -11,7 +11,7 @@ from aisb.cli import parse
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = [ROOT / "docs" / "ops-guide.md", ROOT / "README.md"]
 _SHELLISH = {"", "bash", "sh", "shell", "yaml", "cron", "ini"}
-_SPECIAL = {"mcp", "bundle", "portal", "docs"}   # hand-written subcommands with their own argparse
+_SPECIAL = {"mcp", "bundle", "portal", "docs", "exporter"}   # hand-written subcommands with their own argparse
 
 
 def _blocks(text: str) -> list[str]:

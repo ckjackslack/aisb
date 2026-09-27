@@ -234,8 +234,10 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | group | mutate | `aisb fleet group NAME [--add ADD] [--remove REMOVE] [--inventory INVENTORY] [--dry-run]` | Change group membership in bulk: `fleet group canary --add 'web*,&region=eu'`. |
 | export | read | `aisb fleet export [TARGET] [--format FORMAT] [--inventory INVENTORY]` | The inventory for other tools: a pyinfra inventory.py (groups kept), an ssh_config, or JSON. |
 | ping | read | `aisb fleet ping [TARGET] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--inventory INVENTORY]` | Can each host be reached (SSH, then Docker)? Round-trip time and Docker version per host. |
-| status | read | `aisb fleet status [TARGET] [--no-doctor] [--tail TAIL] [--fail-on FAIL_ON] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--inventory INVENTORY]` | Which machines need attention and why: vitals (load, memory, disk) + container verdicts, worst first. |
-| watch | read | `aisb fleet watch [TARGET] [--interval INTERVAL] [--duration DURATION] [--until-change] [--tail TAIL] [--fail-on FAIL_ON] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--inventory INVENTORY]` | Monitor: re-run status and report only changes: hosts going down/recovering, verdicts, new reasons. |
+| status | read | `aisb fleet status [TARGET] [--no-doctor] [--tail TAIL] [--fail-on FAIL_ON] [--record] [--notify NOTIFY]... [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--inventory INVENTORY]` | Which machines need attention and why: vitals (load, memory, disk) + container verdicts, worst first. |
+| watch | read | `aisb fleet watch [TARGET] [--interval INTERVAL] [--duration DURATION] [--until-change] [--tail TAIL] [--fail-on FAIL_ON] [--record] [--notify NOTIFY]... [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--inventory INVENTORY]` | Monitor: re-run status and report only changes: hosts going down/recovering, verdicts, new reasons. |
+| trends | read | `aisb fleet trends [TARGET] [--since SINCE] [--inventory INVENTORY]` | History from recorded status samples: uptime/health %, load and memory, disk-full forecast |
+| report | read | `aisb fleet report [TARGET] [--since SINCE] [--slo SLO] [--inventory INVENTORY]` | Uptime / health report over a window (from recorded samples), with hosts missing the SLO. |
 | ps | read | `aisb fleet ps [TARGET] [--all] [--name NAME] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--inventory INVENTORY]` | Containers across machines in one table (host column). |
 | doctor | read | `aisb fleet doctor [TARGET] [--tail TAIL] [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--inventory INVENTORY]` | Container problems across machines, worst first, with the host each one is on. |
 | ship | mutate | `aisb fleet ship IMAGE TARGET [--parallel PARALLEL] [--retries RETRIES] [--host-timeout HOST_TIMEOUT] [--batch BATCH] [--fail-fast] [--inventory INVENTORY] [--dry-run]` | Copy an image from this machine to the selected hosts (no registry needed; air-gapped friendly). |
@@ -256,6 +258,14 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | runs | read | `aisb runbook runs [--limit LIMIT]` | Run history, newest first. |
 | show | read | `aisb runbook show RUN` | One run: every step's status, timing, attempts, result summary or error, and approvals. |
 | pending | read | `aisb runbook pending` | Runs waiting for an approval (what the portal's approvals queue shows). |
+
+## notify
+
+| op | tier | usage | summary |
+|---|---|---|---|
+| list | read | `aisb notify list` | Configured sinks (secrets never shown). |
+| send | mutate | `aisb notify send SINK [--title TITLE] [--text TEXT] [--level LEVEL] [--dry-run]` | Send a message (runbooks use this for announcements). --dry-run shows what would be sent, not secrets. |
+| test | mutate | `aisb notify test SINK [--dry-run]` | Send a test message to check a sink's configuration and credentials. |
 
 ## audit
 

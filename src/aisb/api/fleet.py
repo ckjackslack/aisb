@@ -6,7 +6,8 @@ import time
 from collections.abc import Sequence
 from typing import Annotated, Any, Literal
 
-from ..fleet import health, runner
+from .. import notify as notify_mod
+from ..fleet import health, metrics, runner
 from ..fleet.inventory import Host, Inventory
 from ..ops import Op, Resource, Tier, invoke, jsonable, op
 from ..errors import NotFound
@@ -20,6 +21,8 @@ Batch = Annotated[int | None, "rolling: this many hosts at a time"]
 FailFast = Annotated[bool, "stop starting new batches once a host failed"]
 Retries = Annotated[int, "retry a host whose SSH/tunnel setup failed (nothing ran there yet), with backoff"]
 HostTimeout = Annotated[float | None, "per-host wall-clock limit in seconds"]
+Record = Annotated[bool, "store the samples in the metrics history ($AISB_HOME/metrics.db)"]
+Notify = Annotated[list[str] | None, "alert sink from config [notify.NAME] (repeatable)"]
 FailOn = Annotated[Literal["degraded", "failing", "down"] | None, "exit 4 when any host is at this level or worse"]
 Command = Annotated[str, "RESOURCE OP [ARGS...] of the aisb op to run on each host (after --)"]
 _VIA = {Tier.READ: "query", Tier.MUTATE: "apply", Tier.DESTROY: "destroy"}
@@ -175,15 +178,28 @@ class Fleet(Resource, name="fleet"):
     def status(self, target: Target = "all", *,
                doctor: Annotated[bool, "include container triage (slower on big hosts)"] = True,
                tail: Annotated[int, "log lines scanned per container by the triage; 0 = state/config only"] = 50,
-               fail_on: FailOn = None, parallel: Parallel = 16, retries: Retries = 0,
+               fail_on: FailOn = None, record: Record = False, notify: Notify = None,
+               parallel: Parallel = 16, retries: Retries = 0,
                host_timeout: HostTimeout = None, inventory: Inv = None) -> dict[str, Any]:
         """Which machines need attention and why: vitals (load, memory, disk) + container verdicts, worst first.
-        With --fail-on, exits 4 when any host is at that level or worse (cron/CI gates)."""
+        --fail-on exits 4 at that level or worse (cron/CI gates); --record keeps history for `fleet trends`;
+        --notify sends a digest of unhealthy hosts (at the --fail-on level, default degraded) to alert sinks."""
         rows = self._status(Inventory.load(inventory).select(target), doctor=doctor, tail=tail, parallel=parallel,
                             retries=retries, host_timeout=host_timeout)
         summary = {v: sum(r["verdict"] == v for r in rows) for v in health.RANK}
         out = {"summary": summary, "hosts": rows,
                "next": [f"aisb fleet doctor {r['host']}" for r in rows if r["verdict"] in ("failing", "degraded")][:5]}
+        if record:
+            out["recorded"] = metrics.record(rows)
+        if notify:
+            level = fail_on or "degraded"
+            bad = [r for r in rows if health.RANK[r["verdict"]] >= health.RANK[level]]
+            if bad:
+                worst = max(bad, key=lambda r: health.RANK[r["verdict"]])["verdict"]
+                out["notified"] = notify_mod.fan(notify, notify_mod.Message(
+                    f"{len(bad)} host(s) need attention ({target})",
+                    "\n".join(f"{r['host']}: {r['verdict']} - {'; '.join(r['reasons'])}" for r in bad), worst,
+                    {"summary": summary}))
         return {**out, **_gate(fail_on, {r["host"]: r["verdict"] for r in rows})}
 
     @op(Tier.READ)
@@ -191,32 +207,77 @@ class Fleet(Resource, name="fleet"):
               duration: Annotated[float, "stop after N seconds"] = 300.0,
               until_change: Annotated[bool, "return at the first change"] = False,
               tail: Annotated[int, "log lines scanned per container"] = 50,
-              fail_on: FailOn = None, parallel: Parallel = 16, retries: Retries = 0,
+              fail_on: FailOn = None, record: Record = False, notify: Notify = None,
+              parallel: Parallel = 16, retries: Retries = 0,
               host_timeout: HostTimeout = None, inventory: Inv = None) -> dict[str, Any]:
         """Monitor: re-run status and report only changes: hosts going down/recovering, verdicts, new reasons.
-        Connections stay open across polls. With --fail-on, exits 4 if the final state is at that level or worse."""
+        Connections stay open across polls. --record stores every poll; --notify sends each batch of changes as
+        it happens; --fail-on exits 4 if the final state is at that level or worse."""
         with runner.pooled():
             return self._watch(Inventory.load(inventory).select(target), interval=interval, duration=duration,
                                until_change=until_change, tail=tail, fail_on=fail_on, parallel=parallel,
-                               retries=retries, host_timeout=host_timeout)
+                               retries=retries, host_timeout=host_timeout, record=record, notify=notify)
 
     def _watch(self, hosts: list[Host], *, interval: float, duration: float, until_change: bool, tail: int,
-               fail_on: str | None, parallel: int, retries: int, host_timeout: float | None) -> dict[str, Any]:
-        snap = lambda: {r["host"]: {"verdict": r["verdict"], "reasons": r["reasons"]}  # noqa: E731
-                        for r in self._status(hosts, doctor=True, tail=tail, parallel=parallel, retries=retries,
-                                              host_timeout=host_timeout)}
+               fail_on: str | None, parallel: int, retries: int, host_timeout: float | None, record: bool = False,
+               notify: list[str] | None = None) -> dict[str, Any]:
+        def snap() -> dict[str, dict[str, Any]]:
+            rows = self._status(hosts, doctor=True, tail=tail, parallel=parallel, retries=retries,
+                                host_timeout=host_timeout)
+            if record:
+                metrics.record(rows)
+            return {r["host"]: {"verdict": r["verdict"], "reasons": r["reasons"]} for r in rows}
         begin, prev, events, polls = time.monotonic(), snap(), [], 1
         while time.monotonic() - begin + interval <= duration:
             time.sleep(interval)
             cur, polls = snap(), polls + 1
             now = int(time.time())
-            events += [{"at": now, **e} for e in health.changes(prev, cur)]
+            fresh = [{"at": now, **e} for e in health.changes(prev, cur)]
+            events += fresh
+            if notify and fresh:
+                worst = max((cur.get(e["host"], {}).get("verdict", "healthy") for e in fresh),
+                            key=lambda v: health.RANK[v])
+                notify_mod.fan(notify, notify_mod.Message(
+                    f"fleet: {len(fresh)} change(s)", "\n".join(
+                        f"{e['host']}: {e['change']}" + (f" ({e.get('from')} -> {e.get('to')})" if e.get("to") else "")
+                        + (f" new: {'; '.join(e['new'])}" if e.get("new") else "") for e in fresh), worst,
+                    {"events": fresh}))
             prev = cur
             if until_change and events:
                 break
         now_ = {h: s["verdict"] for h, s in prev.items()}
         return {"polls": polls, "events": events, "now": now_,
                 "attention": sorted(h for h, v in now_.items() if v != "healthy"), **_gate(fail_on, now_)}
+
+    @op(Tier.READ)
+    def trends(self, target: Target = "all", *, since: Annotated[str, "window: 7d, 24h, or a timestamp"] = "7d",
+               inventory: Inv = None) -> dict[str, Any]:
+        """History from recorded status samples: uptime/health %, load and memory, disk-full forecast
+        (least squares), and the most frequent reasons, per host. Record with `status --record` or `watch --record`."""
+        from ..util import to_unix
+        names = [h.name for h in Inventory.load(inventory).select(target)]
+        data = metrics.samples(since=to_unix(since), hosts=names)
+        rows = [metrics.summarize(h, data[h]) for h in names if h in data]
+        at_risk = sorted((r for r in rows if (f := r["disk_pct"]["forecast"]) and f.get("days_left") is not None
+                          and f["days_left"] < 14), key=lambda r: r["disk_pct"]["forecast"]["days_left"])
+        return {"since": since, "hosts": rows, "no_data": sorted(set(names) - set(data)),
+                "disk_full_within_14d": [{"host": r["host"], **r["disk_pct"]["forecast"]} for r in at_risk]}
+
+    @op(Tier.READ)
+    def report(self, target: Target = "all", *, since: Annotated[str, "window: 30d, 7d, ..."] = "30d",
+               slo: Annotated[float, "uptime objective in % (hosts below it are listed)"] = 99.5,
+               inventory: Inv = None) -> dict[str, Any]:
+        """Uptime / health report over a window (from recorded samples), with hosts missing the SLO."""
+        from ..util import to_unix
+        names = [h.name for h in Inventory.load(inventory).select(target)]
+        data = metrics.samples(since=to_unix(since), hosts=names)
+        rows = [{k: s[k] for k in ("host", "samples", "uptime_pct", "healthy_pct", "degraded_pct", "failing_pct",
+                                   "last_verdict")} for s in (metrics.summarize(h, data[h]) for h in names if h in data)]
+        total = sum(r["samples"] for r in rows)
+        fleet_up = round(sum(r["uptime_pct"] * r["samples"] for r in rows) / total, 3) if total else None
+        return {"since": since, "slo": slo, "fleet_uptime_pct": fleet_up, "hosts": rows,
+                "below_slo": [r["host"] for r in rows if r["uptime_pct"] is not None and r["uptime_pct"] < slo],
+                "no_data": sorted(set(names) - set(data))}
 
     @op(Tier.READ)
     def ps(self, target: Target = "all", *, all: Annotated[bool, "include stopped containers"] = False,

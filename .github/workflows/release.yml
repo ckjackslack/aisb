@@ -1,15 +1,19 @@
 name: release
 
-# Tag push (vX.Y.Z): build once, attach sdist + wheel + .pyz + SHA256SUMS to a GitHub release, and publish
-# to PyPI when the repository variable PYPI_PUBLISH is "true" (trusted publishing, no token stored).
-# Manual run: re-publish an existing tag to PyPI, e.g. after trusted publishing was set up.
+# Cut a release in either of two ways:
+#   - push a tag vX.Y.Z; or
+#   - Actions -> release -> Run workflow with tag=vX.Y.Z. If the tag doesn't exist yet, it is created on the
+#     commit the run was started from (by `gh release create --target`).
+# One build feeds a GitHub release (sdist, wheel, aisb.pyz, SHA256SUMS) and, when the repository variable
+# PYPI_PUBLISH is "true", PyPI via trusted publishing. Re-running for an existing tag never rewrites the assets
+# of a published release, so it is also how an existing tag gets published to PyPI later.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "existing tag to publish to PyPI (e.g. v0.2.0)"
+        description: "release tag, e.g. v0.2.0 (created on the selected branch's head if it doesn't exist)"
         required: true
 
 permissions:
@@ -19,20 +23,30 @@ jobs:
   build:
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.tag.outputs.tag }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      sha: ${{ steps.resolve.outputs.sha }}
     steps:
-      - id: tag
-        run: echo "tag=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
-          ref: ${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+      - id: resolve
+        name: resolve the tag to a commit
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          case "$TAG" in v[0-9]*) ;; *) echo "::error::tag must look like v1.2.3, got '$TAG'"; exit 1 ;; esac
+          if git rev-parse -q --verify "refs/tags/$TAG^{commit}" >/dev/null; then
+            git checkout -q "refs/tags/$TAG"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: version tag matches the package
         run: |
           pip install -e ".[dev]"
-          test "v$(python -c 'import aisb; print(aisb.__version__)')" = "${{ steps.tag.outputs.tag }}"
+          test "v$(python -c 'import aisb; print(aisb.__version__)')" = "${{ steps.resolve.outputs.tag }}"
       - name: tests (release only what passes)
         run: pytest -q -m "not docker" -p no:cacheprovider
       - name: sdist + wheel (PyPI) and the single-file bundle (GitHub only)
@@ -52,7 +66,6 @@ jobs:
           path: bundle/
 
   github-release:
-    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -62,11 +75,20 @@ jobs:
         with:
           path: out
           merge-multiple: true
-      - name: publish the GitHub release
+      - name: create the release (and its tag), complete an empty one, or leave a published one alone
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "${{ needs.build.outputs.tag }}" out/* --title "aisb ${{ needs.build.outputs.tag }}" --generate-notes
+          TAG: ${{ needs.build.outputs.tag }}
+          SHA: ${{ needs.build.outputs.sha }}
+        run: |
+          if ! assets=$(gh release view "$TAG" --json assets --jq '.assets | length' 2>/dev/null); then
+            gh release create "$TAG" out/* --target "$SHA" --title "aisb $TAG" --generate-notes
+          elif [ "$assets" = 0 ]; then
+            gh release upload "$TAG" out/*      # e.g. a release drafted in the GitHub UI
+          else
+            echo "release $TAG already has $assets assets; not replacing them"
+          fi
 
   pypi:
     if: vars.PYPI_PUBLISH == 'true'
@@ -83,3 +105,5 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true   # re-runs for an already-uploaded version succeed instead of failing

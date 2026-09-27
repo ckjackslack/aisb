@@ -225,9 +225,19 @@ def test_lit_backslash_modes():
     "/* \\! id */ select 1", "# \\! id\nselect 1", "select 1;\nconnect other", "select 1;\nresetconnection",
     "delimiter //\nselect 1//",
     "select 1; system id", "select 1;system id", "select 1;  tee /tmp/o",  # mysql 8.4 runs these (same line)
+    "select X;\n\\! id",               # letters are not quote characters
+    "select 'a\\'' \\! id'",          # only the backslash-escaping reading closes the string before \!
 ])
 def test_mysql_client_commands_are_found(sql):
     assert mysql_client_command(sql) is not None
+
+
+@pytest.mark.parametrize(("sql", "found"), [
+    ("\\! id", "\\!"), ("select 1;\nsystem id", "system"), ("select 1; tee /o", "tee"), ("\\T /o", "\\T"),
+    ("/* \\! id */ select 1", "/* \\! id */"),
+])
+def test_mysql_client_command_reports_what_it_found(sql, found):
+    assert mysql_client_command(sql) == found
 
 
 @pytest.mark.parametrize("sql", [

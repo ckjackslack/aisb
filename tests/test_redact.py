@@ -112,3 +112,26 @@ def test_capsule_load_refuses_until_command_secrets_are_supplied(client, daemon,
 ])
 def test_healthcheck_forms(test, masked, names):
     assert redact.healthcheck(test) == (masked, names)
+
+
+def test_a_secret_flag_as_the_last_argument_has_no_value_to_hide():
+    assert redact.args(["app", "--password"]) == (["app", "--password"], [])
+
+
+def test_shell_text_that_does_not_parse_falls_back_to_tokens_only():
+    text, names = redact.shell("curl 'https://u:hunter2@x/ -o", prefix="entrypoint")
+    assert text == "curl 'https://u:<redacted:entrypoint>@x/ -o" and names == ["entrypoint"]
+    assert redact.shell("echo 'unbalanced", prefix="entrypoint") == ("echo 'unbalanced", [])
+
+
+def test_shell_text_without_secrets_is_returned_untouched():
+    assert redact.shell("echo  'a  b'   c", prefix="health") == ("echo  'a  b'   c", [])  # not re-quoted
+
+
+def test_empty_shell_healthcheck_stays_empty():
+    assert redact.healthcheck(["CMD-SHELL", ""]) == (["CMD-SHELL", ""], [])
+
+
+@pytest.mark.parametrize("key", ["tls.key", "api-key", "app.api-key"])
+def test_label_keys_with_dots_and_dashes(key):
+    assert redact.labels({key: "v"}) == ({key: f"<redacted:label:{key}>"}, [f"label:{key}"])

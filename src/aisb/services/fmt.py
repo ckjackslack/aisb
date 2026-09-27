@@ -42,7 +42,7 @@ def render(columns: Sequence[str], rows: Sequence[Sequence[Any]], fmt: Format) -
         buf = io.StringIO()
         w = csv.writer(buf, lineterminator="\n")
         w.writerow(columns)
-        w.writerows(["" if v is None else v for v in r] for r in rows)
+        w.writerows(["" if v is None else _cell(v) if isinstance(v, (dict, list)) else v for v in r] for r in rows)
         return buf.getvalue()
     cells = [[_cell(v) for v in r] for r in rows]
     widths = [max([len(c), *(len(r[i]) for r in cells if i < len(r))]) for i, c in enumerate(columns)]

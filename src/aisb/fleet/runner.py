@@ -1,6 +1,7 @@
 """Connect to a host's Docker (SSH tunnel, direct endpoint, or local) and fan work out over many hosts."""
 
 import contextvars
+import itertools
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -137,7 +138,7 @@ def _one(host: Host, fn: Callable[[Host], Any]) -> HostResult:
 def _attempt(host: Host, fn: Callable[[Host], Any], retries: int, host_timeout: float | None) -> HostResult:
     """Run one host with retries (transient failures only) under an optional wall-clock deadline."""
     deadline = time.monotonic() + host_timeout if host_timeout else None
-    for n in range(1, retries + 2):
+    for n in itertools.count(1):  # attempt n of 1 + max(0, retries)
         if host_timeout:
             box: list[HostResult] = []
             ctx = contextvars.copy_context()
@@ -153,7 +154,7 @@ def _attempt(host: Host, fn: Callable[[Host], Any], retries: int, host_timeout: 
         if res.ok or not res.transient or n > retries or (deadline and time.monotonic() >= deadline):
             return res
         time.sleep(min(2 ** (n - 1), 10))
-    return res
+    raise AssertionError("unreachable")
 
 
 def fan_out(hosts: Sequence[Host], fn: Callable[[Host], Any], *, parallel: int = 8, batch: int | None = None,

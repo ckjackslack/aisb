@@ -64,4 +64,4 @@ branch = true
 show_missing = true
 skip_covered = true
 fail_under = 97
-exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError", "if __name__ == .__main__.:"]
+exclude_also = ["if TYPE_CHECKING:", 'raise AssertionError\(.unreachable.\)', "raise NotImplementedError", "if __name__ == .__main__.:"]

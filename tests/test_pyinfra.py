@@ -19,6 +19,7 @@ def test_bundle_is_deterministic_and_stdlib_only(tmp_path):
     a, b = bundle.build(), bundle.build()
     assert a == b and a.startswith(bundle.SHEBANG)
     names = zipfile.ZipFile(io.BytesIO(a[len(bundle.SHEBANG):])).namelist()
+    assert {"LICENSE", "NOTICE"} <= set(names)            # license terms travel with every redistribution
     assert "__main__.py" in names and "aisb/cli.py" in names
     assert not any(n.startswith("aisb/contrib/") or "__pycache__" in n for n in names)
 

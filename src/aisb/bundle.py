@@ -15,6 +15,7 @@ from pathlib import Path
 
 SHEBANG = b"#!/usr/bin/env python3\n"
 MAIN = b"from aisb.cli import main\n\nraise SystemExit(main())\n"
+LEGAL = ("LICENSE", "NOTICE")  # Apache-2.0 §4: redistributions carry the license and the attribution notice
 EXCLUDE = ("contrib",)  # optional integrations import third-party packages; the bundle stays stdlib-only
 _EPOCH = (1980, 1, 1, 0, 0, 0)
 
@@ -30,11 +31,28 @@ def sources(pkg: Path | None = None) -> list[tuple[str, bytes]]:
     return out
 
 
+def legal(pkg: Path | None = None) -> list[tuple[str, bytes]]:
+    """LICENSE and NOTICE from the source checkout, else from the installed distribution's metadata."""
+    root = (pkg or Path(sys.modules["aisb"].__path__[0])).resolve().parents[1]
+    found = {n: root / n for n in LEGAL if (root / n).is_file()}
+    if len(found) < len(LEGAL):
+        from importlib import metadata
+        try:
+            dist = metadata.distribution("aisb")
+            found |= {f.name: Path(str(dist.locate_file(f))) for f in dist.files or ()
+                      if f.name in LEGAL and f.name not in found}
+        except metadata.PackageNotFoundError:
+            pass
+    if missing := [n for n in LEGAL if n not in found]:
+        raise FileNotFoundError(f"cannot bundle without {', '.join(missing)} (license terms must travel with the code)")
+    return [(n, found[n].read_bytes()) for n in LEGAL]
+
+
 def build(pkg: Path | None = None) -> bytes:
-    """The .pyz bytes: shebang + a zip with `__main__.py` and the aisb package."""
+    """The .pyz bytes: shebang + a zip with `__main__.py`, LICENSE, NOTICE and the aisb package."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for name, data in [("__main__.py", MAIN), *sources(pkg)]:
+        for name, data in [("__main__.py", MAIN), *legal(pkg), *sources(pkg)]:
             info = zipfile.ZipInfo(name, _EPOCH)
             info.compress_type, info.external_attr = zipfile.ZIP_DEFLATED, 0o644 << 16
             z.writestr(info, data)

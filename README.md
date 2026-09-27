@@ -2,6 +2,10 @@
 
 A Docker Engine API client built on the **Python stdlib alone** (3.11+): no `docker` SDK, no `requests`, and no shelling out to the docker CLI. On top of it sit an agent-friendly CLI and a Claude Code skill.
 
+> **Use at your own risk.** aisb can stop, delete and modify containers, images, volumes, databases and remote
+> machines. It is provided "as is", without warranty; you are responsible for how you use it and for what you approve.
+> See [License and disclaimer](#license-and-disclaimer).
+
 ```bash
 pip install -e .            # or: export PYTHONPATH=src
 aisb system ping
@@ -282,3 +286,22 @@ pytest -m docker                   # live round-trips; auto-skipped without a da
 ruff check src tests && mypy       # lint + types (config in pyproject.toml); CI runs both on 3.11-3.13
 aisb docs --site site/             # static per-resource command reference
 ```
+
+## License and disclaimer
+
+Licensed under the [Apache License, Version 2.0](LICENSE): free to use, modify and redistribute, including
+commercially, provided that:
+
+- you keep the [LICENSE](LICENSE) and [NOTICE](NOTICE) files (or their text) with any copy or derivative work,
+  including the `aisb bundle` `.pyz`, which embeds both;
+- you credit the project: *"Includes aisb (https://github.com/ckjackslack/aisb), Copyright 2026 ckjackslack,
+  licensed under Apache-2.0"*, in your documentation or about/credits screen;
+- modified files carry a notice that you changed them.
+
+**No warranty, no liability.** The software is provided "AS IS", without warranties or conditions of any kind. aisb
+automates powerful and sometimes irreversible operations (deleting containers and volumes, changing databases,
+running commands on remote hosts, acting on behalf of AI agents). Safety tiers, previews, policy rules and undo
+sessions reduce risk but do not remove it. **You alone are responsible** for how you use it, for reviewing plans
+before approving them, for backups, and for any consequences, including data loss, downtime, security incidents or
+costs. To the extent permitted by law, the authors and contributors are not liable for any damage arising from its
+use or misuse (Sections 7 and 8 of the License).

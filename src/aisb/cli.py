@@ -142,7 +142,7 @@ def _preamble(argv: list[str]) -> list[str]:
     while argv and argv[0] in ("--profile", "--version") or (argv and argv[0].startswith("--profile=")):
         flag = argv.pop(0)
         if flag == "--version":
-            print(f"aisb {__version__}")
+            print(f"aisb {__version__} (Apache-2.0, no warranty; see LICENSE and NOTICE)")
             raise SystemExit(EXIT_OK)
         name = flag.split("=", 1)[1] if "=" in flag else (argv.pop(0) if argv else "")
         os.environ["AISB_PROFILE"] = name

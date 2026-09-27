@@ -270,7 +270,7 @@ class Session(Resource, name="session"):
         for name in diff["volumes"]["added"]:
             if name in removed:  # its journaled inverse already removes it
                 continue
-            step(f"remove added volume {name}", lambda n=name: self.t.json("DELETE", f"/volumes/{q(n)}"), where)
+            step(f"remove added volume {name}", lambda n=name: self._remove_volume(n), where)
         for name in diff["networks"]["added"]:
             step(f"remove added network {name}", lambda n=name: self.t.json("DELETE", f"/networks/{q(n)}"), where)
 
@@ -296,9 +296,12 @@ class Session(Resource, name="session"):
                     spec = spec.merge(volumes=tuple(f"{restored[v]}:{v}" if v in restored else v
                                                     for v in spec.volumes))
                 cid = ctr.create_from(spec, pull=False)
-                for n in nets:
-                    if n not in (primary, "bridge", "host", "none"):
-                        self.t.json("POST", f"/networks/{q(n)}/connect", body={"Container": cid})
+                for n in nets:  # the rest, with their DNS aliases (the default bridge only if create didn't attach it)
+                    if n in (primary, "host", "none") or (n == "bridge" and primary is None):
+                        continue
+                    aliases = [a for a in inv["networks"][n] if len(a) != 12]
+                    self.t.json("POST", f"/networks/{q(n)}/connect",
+                                body={"Container": cid, **({"EndpointConfig": {"Aliases": aliases}} if aliases else {})})
                 if inv.get("running"):
                     self.t.json("POST", f"/containers/{cid}/start")
             step(f"recreate container {inv['name']}", recreate)
@@ -328,6 +331,12 @@ class Session(Resource, name="session"):
         elif kind == "set-running":
             step(f"{'start' if inv['running'] else 'stop'} {inv['name']}",
                  lambda: self.t.json("POST", f"/containers/{q(inv['name'])}/{'start' if inv['running'] else 'stop'}"))
+
+    def _remove_volume(self, name: str) -> None:
+        try:
+            self.t.json("DELETE", f"/volumes/{q(name)}")
+        except NotFound:
+            pass  # already gone: an added container's anonymous volume is removed with it (v=True above)
 
     def _ensure_volume(self, name: str, meta: dict[str, Any] | None) -> None:
         """Recreate a removed volume with its driver, options and labels before its data goes back in."""

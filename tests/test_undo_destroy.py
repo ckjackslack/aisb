@@ -43,8 +43,8 @@ class World:
     def __init__(self, d: FakeDaemon) -> None:
         self.d = d
         self.containers: dict[str, dict[str, Any]] = {}   # name -> record
-        self.volumes: dict[str, dict[str, Any]] = {}      # name -> {"files": {...}, "labels": {...}}
-        self.networks: dict[str, dict[str, Any]] = {}     # name -> {"Id", "labels"}
+        self.volumes: dict[str, dict[str, Any]] = {}      # name -> {"files", "labels"[, "driver", "options"]}
+        self.networks: dict[str, dict[str, Any]] = {}     # name -> {"Id", "labels"[, "driver", "internal"]}
         self.fail: dict[tuple[str, str], Reply] = {}      # (method, path) -> forced reply
         self._routes()
 
@@ -192,18 +192,20 @@ class World:
 
         def ls_volumes(seen):
             want = label_filter(seen)
-            return Reply(json={"Volumes": [{"Name": n, "Driver": "local", "Labels": v["labels"]}
+            return Reply(json={"Volumes": [{"Name": n, "Driver": v.get("driver", "local"), "Labels": v["labels"]}
                                            for n, v in W.volumes.items() if matches(v["labels"], want)]})
 
         def get_volume(seen):
             n = seen.path.split("/")[2]
-            return Reply(json={"Name": n, "Driver": "local", "Labels": W.volumes[n]["labels"],
+            return Reply(json={"Name": n, "Driver": W.volumes[n].get("driver", "local"), "Labels": W.volumes[n]["labels"],
                                "Options": W.volumes[n].get("options") or {}}) \
                 if n in W.volumes else Reply(404, json={"message": "no"})
 
         def create_volume(seen):
-            W.volumes.setdefault(seen.body["Name"], {"files": {}, "labels": seen.body.get("Labels") or {}})
-            return Reply(201, json={"Name": seen.body["Name"], "Driver": "local"})
+            b = seen.body
+            W.volumes.setdefault(b["Name"], {"files": {}, "labels": b.get("Labels") or {},
+                                             "driver": b.get("Driver") or "local", "options": b.get("DriverOpts") or {}})
+            return Reply(201, json={"Name": b["Name"], "Driver": b.get("Driver") or "local"})
 
         def rm_volume(seen):
             if r := forced(seen):
@@ -216,7 +218,8 @@ class World:
 
         def ls_networks(seen):
             want = label_filter(seen)
-            return Reply(json=[{"Name": n, "Id": v["Id"], "Driver": "bridge", "Labels": v["labels"]}
+            return Reply(json=[{"Name": n, "Id": v["Id"], "Driver": v.get("driver", "bridge"),
+                                "Internal": bool(v.get("internal")), "Labels": v["labels"]}
                                for n, v in W.networks.items() if matches(v["labels"], want)])
 
         def get_network(seen):
@@ -224,12 +227,15 @@ class World:
             if hit is None:
                 return Reply(404, json={"message": "network not found"})
             name, v = hit
-            return Reply(json={"Name": name, "Id": v["Id"], "Driver": "bridge", "Labels": v["labels"], "Containers": {
+            return Reply(json={"Name": name, "Id": v["Id"], "Driver": v.get("driver", "bridge"),
+                               "Internal": bool(v.get("internal")), "Labels": v["labels"], "Containers": {
                 c["Id"]: {"Name": c["name"]} for c in W.containers.values() if name in c["networks"]}})
 
         def create_network(seen):
             nid = uuid.uuid4().hex * 2
-            W.networks[seen.body["Name"]] = {"Id": nid, "labels": seen.body.get("Labels") or {}}
+            b = seen.body
+            W.networks[b["Name"]] = {"Id": nid, "labels": b.get("Labels") or {}, "driver": b.get("Driver") or "bridge",
+                                     "internal": bool(b.get("Internal"))}
             return Reply(201, json={"Id": nid})
 
         def rm_network(seen):
@@ -243,7 +249,11 @@ class World:
 
         def connect(seen):
             c = W.find(seen.body["Container"])
-            name, _ = W.net(seen.path.split("/")[2])
+            ref = seen.path.split("/")[2]
+            hit = W.net(ref)
+            if hit is None and ref not in ("bridge", "host", "none"):  # the built-in networks always exist
+                return Reply(404, json={"message": f"network {ref} not found"})
+            name = hit[0] if hit else ref
             c["networks"][name] = (seen.body.get("EndpointConfig") or {}).get("Aliases") or []
             return Reply(200)
 

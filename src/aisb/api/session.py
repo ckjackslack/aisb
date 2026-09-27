@@ -51,6 +51,11 @@ def _container_state(client: HasResources, ref: str, artifacts: Path, *, volumes
     return inv
 
 
+def _network_state(n: dict[str, Any]) -> dict[str, Any]:
+    return {"kind": "recreate-network", "name": n["Name"], "driver": n.get("Driver") or "bridge",
+            "internal": bool(n.get("Internal")), "labels": n.get("Labels") or {}}
+
+
 def capture(client: HasResources, o: Op, kwargs: Any) -> None:
     """ops.HOOKS entry: before a real mutate/destroy op, record how to undo it in the active session."""
     sid = current()
@@ -91,9 +96,21 @@ def capture(client: HasResources, o: Op, kwargs: Any) -> None:
             out.write_bytes(bytes(buf))
             entry["inverse"] = {"kind": "restore-db", "container": kwargs["ref"], "database": kwargs.get("database"),
                                 "dump": str(out)}
+        elif o.qualname == "networks.rm":
+            entry["inverse"] = _network_state(client.transport.json("GET", f"/networks/{q(kwargs['ref'])}"))
         elif o.qualname == "stack.down":
-            rows = client.resource("stack")._containers(client.resource("stack")._name(kwargs["stack"])[0])  # type: ignore[attr-defined]
-            entry["inverse"] = {"kind": "group", "steps": [
+            from ..stack import STACK_KEY
+            name = client.resource("stack")._name(kwargs["stack"])[0]  # type: ignore[attr-defined]
+            rows = client.resource("stack")._containers(name)  # type: ignore[attr-defined]
+            steps: list[dict[str, Any]] = []
+            if not kwargs.get("service"):  # a whole-stack down also removes its network (and, if asked, volumes)
+                label = {"filters": {"label": [f"{STACK_KEY}={name}"]}}
+                steps += [_network_state(n) for n in client.transport.json("GET", "/networks", query=label) or []]
+                if kwargs.get("volumes"):
+                    steps += [{"kind": "restore-volume", "name": v["Name"],
+                               "backup": _backup_volume(client, v["Name"], artifacts)}
+                              for v in (client.transport.json("GET", "/volumes", query=label) or {}).get("Volumes") or []]
+            entry["inverse"] = {"kind": "group", "steps": steps + [
                 _container_state(client, r["Id"], artifacts, volumes=False) for r in rows]}
         elif o.qualname in ("containers.stop", "containers.start", "containers.restart"):
             info = client.transport.json("GET", f"/containers/{q(kwargs['ref'])}/json")
@@ -149,7 +166,7 @@ class Session(Resource, name="session"):
         """Sessions on this machine, newest first."""
         out = []
         for d in sorted(state.home("sessions").iterdir(), reverse=True):
-            if (meta := state.read_json(d / "session.json")) is not None:
+            if d.is_dir() and (meta := state.read_json(d / "session.json")) is not None:
                 out.append({"session": meta["id"], "name": meta.get("name"), "active": meta.get("active"),
                             "began": int(meta["began"]), "changes": sum(1 for _ in state.read_jsonl(d / "journal.jsonl"))})
         return out
@@ -220,21 +237,27 @@ class Session(Resource, name="session"):
         """Roll one endpoint back to its baseline (self.t is that endpoint's transport)."""
         from .system import System
         diff = snap.compare(baseline, System(self.t).snapshot())
-        recreated = {s["name"] for e in journal if not e["done"] and e.get("inverse")
-                     for s in ([e["inverse"]] + e["inverse"].get("steps", [])) if s.get("kind") == "recreate-container"}
         for name in diff["containers"]["added"]:
-            if name not in recreated:
-                step(f"remove added container {name}",
-                     lambda n=name: self.t.json("DELETE", f"/containers/{q(n)}", query={"force": True, "v": True}), where)
+            step(f"remove added container {name}",
+                 lambda n=name: self.t.json("DELETE", f"/containers/{q(n)}", query={"force": True, "v": True}), where)
+        # objects created during the session and removed again were never in the baseline: don't bring them back
+        existed = {"recreate-container": set(baseline.get("containers") or {}),
+                   "restore-volume": set(baseline.get("volumes") or {}),
+                   "recreate-network": set(baseline.get("networks") or {})}
         ctr = Containers(self.t)
         for e in reversed(journal):
             if e["done"] or not e.get("inverse"):
                 continue
             for inv in [e["inverse"]] + e["inverse"].get("steps", []):
+                if inv.get("kind") in existed and inv.get("name") not in existed[inv["kind"]]:
+                    continue
                 self._undo(inv, ctr, lambda desc, fn: step(desc, fn, where))
             if not planning:
                 e["done"] = True
+        removed = {e["inverse"]["name"] for e in journal if (e.get("inverse") or {}).get("kind") == "remove-volume"}
         for name in diff["volumes"]["added"]:
+            if name in removed:  # its journaled inverse already removes it
+                continue
             step(f"remove added volume {name}", lambda n=name: self.t.json("DELETE", f"/volumes/{q(n)}"), where)
         for name in diff["networks"]["added"]:
             step(f"remove added network {name}", lambda n=name: self.t.json("DELETE", f"/networks/{q(n)}"), where)
@@ -253,8 +276,12 @@ class Session(Resource, name="session"):
                 primary = next((n for n in nets if n not in ("bridge", "host", "none")), None)
                 spec = spec.merge(network=primary, aliases=tuple(a for a in inv["networks"].get(primary, [])
                                                                    if len(a) != 12)) if primary else spec
+                restored = {v["destination"]: v["name"] for v in inv.get("volumes") or []}
                 for v in inv.get("volumes") or []:
                     self.resource_volumes().restore(v["name"], v["backup"])
+                if restored:  # mount the restored volumes by name, not as fresh (empty) anonymous volumes
+                    spec = spec.merge(volumes=tuple(f"{restored[v]}:{v}" if v in restored else v
+                                                    for v in spec.volumes))
                 cid = ctr.create_from(spec, pull=False)
                 for n in nets:
                     if n not in (primary, "bridge", "host", "none"):
@@ -262,6 +289,16 @@ class Session(Resource, name="session"):
                 if inv.get("running"):
                     self.t.json("POST", f"/containers/{cid}/start")
             step(f"recreate container {inv['name']}", recreate)
+        elif kind == "recreate-network":
+            def recreate_network() -> None:
+                try:
+                    self.t.json("GET", f"/networks/{q(inv['name'])}")
+                    return  # still there (e.g. kept because other containers use it)
+                except NotFound:
+                    pass
+                self.t.json("POST", "/networks/create", body={"Name": inv["name"], "Driver": inv["driver"],
+                                                              "Internal": inv["internal"], "Labels": inv["labels"]})
+            step(f"recreate network {inv['name']}", recreate_network)
         elif kind == "restore-volume":
             step(f"restore volume {inv['name']}", lambda: self.resource_volumes().restore(inv["name"], inv["backup"],
                                                                                         clear=True))

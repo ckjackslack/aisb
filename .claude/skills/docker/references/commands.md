@@ -28,7 +28,7 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | start | mutate | `aisb containers start REF [--dry-run]` | Start a stopped container. |
 | stop | mutate | `aisb containers stop REF [--grace GRACE] [--dry-run]` | Stop a running container (SIGTERM, then SIGKILL after --grace). |
 | restart | mutate | `aisb containers restart REF [--grace GRACE] [--dry-run]` | Restart a container. |
-| limit | mutate | `aisb containers limit REF [--memory MEMORY] [--cpus CPUS] [--pids PIDS] [--dry-run]` | Change resource limits of a live container in place (no recreate); swap is capped to the new memory. |
+| limit | mutate | `aisb containers limit REF [--memory MEMORY] [--cpus CPUS] [--pids PIDS] [--dry-run]` | Change resource limits of a live container in place (no recreate); swap is set equal to the new memory (MemorySwap = 2x). |
 | exec | mutate | `aisb containers exec REF [-- CMD...] [--workdir WORKDIR] [--user USER] [--env ENV]... [--max-bytes MAX_BYTES] [--dry-run]` | Run a command in a running container; returns exit code and output. |
 | cp | mutate | `aisb containers cp SRC DEST [--dry-run]` | Copy files between a container and the local filesystem (one side must be CONTAINER:PATH). |
 | rm | destroy | `aisb containers rm REF [--force] [--volumes] [--dry-run] [--yes]` | Remove a container. |

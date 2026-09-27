@@ -24,6 +24,16 @@ def _esc(v: Any) -> str:
     return str(v).replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
 
 
+def _num(v: float | int) -> str:
+    """Exact sample value: `:g` keeps only 6 significant digits (a unix timestamp would be off by up to an hour)."""
+    f = float(v)
+    if f != f:
+        return "NaN"
+    if f in (float("inf"), float("-inf")):
+        return "+Inf" if f > 0 else "-Inf"
+    return str(int(f)) if f.is_integer() and abs(f) < 2 ** 53 else repr(f)
+
+
 def _name(s: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_:]", "_", s)
 
@@ -41,7 +51,7 @@ class Exposition:
         name = _name(name)
         fam = self.families.setdefault(name, (help_, kind, []))
         lab = ",".join(f'{_name(k)}="{_esc(v)}"' for k, v in (labels or {}).items())
-        fam[2].append(f"{name}{{{lab}}} {float(value):g}" if lab else f"{name} {float(value):g}")
+        fam[2].append(f"{name}{{{lab}}} {_num(value)}" if lab else f"{name} {_num(value)}")
 
     def render(self) -> str:
         out = []

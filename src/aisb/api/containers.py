@@ -490,7 +490,11 @@ class Containers(Resource, name="containers"):
             entries = []
             for line in text.splitlines():
                 ts, _, msg = line.partition(" ")
-                if (when := docker_time(ts)) is not None and (not rx or rx.search(msg)):
+                try:
+                    when = docker_time(ts)
+                except ValueError:  # a continuation after a bare \r (progress bars) carries no timestamp
+                    continue
+                if when is not None and (not rx or rx.search(msg)):
                     entries.append((when, r, msg))
             streams.append(entries)
         merged = list(heapq.merge(*streams))
@@ -553,7 +557,7 @@ class Containers(Resource, name="containers"):
     def limit(self, ref: Ref, *, memory: Annotated[str | None, "e.g. 256m, 1g (0 = unlimited)"] = None,
               cpus: Annotated[float | None, "e.g. 0.5 (0 = unlimited)"] = None,
               pids: Annotated[int | None, "max processes (0 = unlimited)"] = None) -> dict[str, Any]:
-        """Change resource limits of a live container in place (no recreate); swap is capped to the new memory."""
+        """Change resource limits of a live container in place (no recreate); swap is set equal to the new memory (MemorySwap = 2x)."""
         if memory is None and cpus is None and pids is None:
             raise ValueError("give at least one of --memory, --cpus, --pids")
         hc = (self.t.json("GET", f"/containers/{q(ref)}/json") or {}).get("HostConfig") or {}

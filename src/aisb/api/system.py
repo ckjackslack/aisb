@@ -256,7 +256,10 @@ class System(Resource, name="system"):
                 continue
             for line in text.splitlines():
                 ts, _, msg = line.partition(" ")
-                when = docker_time(ts)
+                try:
+                    when = docker_time(ts)
+                except ValueError:  # a continuation after a bare \r (progress bars) carries no timestamp
+                    continue
                 lvl = level_of(msg)
                 if when is None or lvl not in ("error", "warn"):
                     continue

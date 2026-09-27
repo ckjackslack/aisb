@@ -42,7 +42,7 @@ No host clients and no credential hunting: `aisb` detects the service, reads cre
 ```bash
 aisb svc list                                   # what runs where + host connection URLs (secrets masked)
 aisb svc ready pg                               # SELECT 1 succeeds and init is finished, not just "a log line appeared"
-aisb db query pg "select * from orders limit 5" --format table   # read-only, enforced by the server
+aisb db query pg "select * from orders limit 5" --format table   # read-only session (guard, not a security boundary)
 aisb db exec pg --file migration.sql --dry-run  # write path, previewable, secrets redacted
 aisb db activity pg                             # running queries, blockers, locks, cache hit ratio
 aisb db dump pg backup.sql.gz                   # streamed and gzipped on the host

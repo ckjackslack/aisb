@@ -56,7 +56,7 @@ Before a session that will create or change things, take a snapshot so you can r
 |---|---|---|
 | What runs where, and how to connect | `svc list`, `svc url NAME` | Host URLs with secrets masked. `--reveal` prints the password, so use it only if the user asks. A `note` explains unpublished ports. |
 | Wait until it *really* works | `svc ready NAME --within 120` | Real probe (`SELECT 1`, `PING`, TCP) plus the init-phase check. Use this before the first query on a new DB, **not** `containers wait --log`. |
-| Read data | `db query NAME "SELECT ..."` | **Read-only enforced by the server.** Decimals stay exact strings, integers become numbers, NULL stays null. `--limit` defaults to 1000. |
+| Read data | `db query NAME "SELECT ..."` | **Runs in a read-only session** (psql meta-commands and mysql client commands are refused). This guards against accidents, not a determined caller: SQL can reset the session, so give untrusted agents a read-only database role. Decimals stay exact strings, integers become numbers, NULL stays null. `--limit` defaults to 1000. |
 | Change data or schema | `db exec NAME "UPDATE ..."`, `db exec NAME --file m.sql` | Mutate tier: preview with `--dry-run`, which redacts secrets. Returns `affected`. |
 | Explore schema | `db tables NAME`, `db describe NAME TABLE` | Postgres, MySQL/MariaDB, SQLite (`--path /file.db` inside the container; no sqlite3 needed there). |
 | Backup / restore | `db dump NAME out.sql.gz`; `db restore NAME f.sql.gz` | Dump streams gzipped to the host. **Restore is destroy tier.** |

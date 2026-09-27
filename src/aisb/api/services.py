@@ -158,7 +158,7 @@ class Svc(Resource, name="svc"):
 
 class Db(Resource, name="db"):
     @op(Tier.READ)
-    def query(self, ref: Ref, sql: Annotated[str, "SQL to run (read-only, enforced by the server)"], *,
+    def query(self, ref: Ref, sql: Annotated[str, "SQL to run in a read-only session (a guard against accidents, not a security boundary: use a read-only DB role for untrusted callers)"], *,
               database: Database = None, format: Fmt = "json", limit: Annotated[int, "max rows; 0 = all"] = 1000,
               out: Out = None, seconds: Annotated[int, "statement timeout"] = 30,
               engine: Engine = None, path: DbPath = None) -> dict[str, Any]:

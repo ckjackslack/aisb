@@ -26,6 +26,52 @@ _NIL = "{http://www.w3.org/2001/XMLSchema-instance}nil"
 _MARK = "__aisb_rows__"
 
 
+# mysql-client commands that act outside the server (shell, files, reconnect); the long forms are recognized
+# at the start of a line when no statement is pending
+_MYSQL_LONG_CMD = re.compile(r"[ \t\r]*(system|source|tee|pager|edit|connect|resetconnection|delimiter|charset)\b", re.I)
+
+
+def _mysql_comment_end(sql: str, i: int) -> int | None:
+    """End of a comment starting at i, as the mysql client sees it (`/*!` and `/*+` are not comments to it)."""
+    if sql.startswith("/*", i) and sql[i + 2:i + 3] not in ("!", "+"):
+        j = sql.find("*/", i + 2)
+        return len(sql) if j < 0 else j + 2
+    if sql[i] == "#" or (sql.startswith("--", i) and (i + 2 == len(sql) or sql[i + 2].isspace())):
+        j = sql.find("\n", i)
+        return len(sql) if j < 0 else j
+    return None
+
+
+def mysql_client_command(sql: str) -> str | None:
+    """The first mysql-client command in SQL (`\\! sh`, `system ...`, `tee file`...) outside quotes, if any.
+
+    Scanned with and without backslash escapes in strings (the server's NO_BACKSLASH_ESCAPES decides how the
+    client splits strings), so neither reading can hide a command; a backslash inside a comment counts too.
+    """
+    for escapes in (True, False):
+        i, n, quote, line_start, idle = 0, len(sql), "", True, True
+        while i < n:
+            c = sql[i]
+            if quote:
+                i += 2 if c == "\\" and escapes else 1
+                quote = "" if c == quote else quote
+                continue
+            if line_start and idle and (m := _MYSQL_LONG_CMD.match(sql, i)):
+                return m.group(1)
+            line_start = c == "\n"
+            if (end := _mysql_comment_end(sql, i)) is not None:
+                if "\\" in sql[i:end]:
+                    return sql[i:end]
+                i = end
+                continue
+            if c == "\\" and sql[i + 1:i + 2] != "N":  # \N is the NULL literal
+                return sql[i:i + 2]
+            quote = c if c in "'\"`" else ""
+            idle = c == ";" or (idle and c.isspace())
+            i += 1
+    return None
+
+
 def lit(s: str, *, backslash: bool = False) -> str:
     """SQL string literal; MySQL (backslash=True) also treats backslash as an escape character."""
     if backslash:
@@ -151,6 +197,10 @@ class Postgres(SQL):
     def _conn(self, database: str | None) -> list[str]:
         # With a known password use TCP (works for official and bitnami images); otherwise the trusted local socket.
         host = ["-h", "127.0.0.1"] if self.password() else []
+        if database and ("=" in database or database.startswith(("postgres://", "postgresql://"))):
+            # psql/pg_dump read such a -d value as a connection string, whose `options`/`host` would override
+            # PGOPTIONS (the read-only guard) or send the password elsewhere
+            raise ValueError(f"postgres: database must be a plain name, not a connection string: {database!r}")
         return [*host, "-U", self.user(), "-d", database or self.database()]
 
     def _env(self, *, readonly: bool = False, seconds: int = 0) -> dict[str, str | None]:
@@ -160,6 +210,9 @@ class Postgres(SQL):
                 "PGOPTIONS": " ".join(opts) or None}
 
     def query(self, sql: str, *, readonly: bool = True, database: str | None = None, seconds: int = 30) -> Result:
+        if readonly and sql.lstrip().startswith("\\"):  # psql runs a -c starting with \ as a meta-command (\! = shell)
+            raise ValueError("postgres: psql meta-commands (\\...) are not allowed in a read-only query")
+
         def go() -> Result:
             argv = ["psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", *self._conn(database), "--csv", "-P", "null=\\N",
                     "-c", sql, "-c", f"\\echo {_MARK} :ROW_COUNT"]
@@ -357,11 +410,20 @@ class MySQL(SQL):
         raise ServiceError(f"{self.kind}: no client binary in container ({', '.join(self._client(tool))}): "
                            f"{(last.stderr or last.stdout).strip() if last else ''}")
 
-    def _auth(self, database: str | None) -> list[str]:
+    def _db(self, database: str | None) -> str | None:
         db = database or self.database()
+        if db and db.startswith("-"):  # a positional database starting with '-' is read as a client option
+            raise ValueError(f"mysql: invalid database name {db!r}")
+        return db
+
+    def _auth(self, database: str | None) -> list[str]:
+        db = self._db(database)
         return ["-u", self.user(), "--default-character-set=utf8mb4", *([db] if db else [])]
 
     def query(self, sql: str, *, readonly: bool = True, database: str | None = None, seconds: int = 30) -> Result:
+        if readonly and (cmd := mysql_client_command(sql)) is not None:  # e.g. `\! sh` or `system ...` runs a shell
+            raise ValueError(f"mysql: client commands are not allowed in a read-only query: {cmd[:40]!r}")
+
         def go() -> Result:
             pre = "SET SESSION TRANSACTION READ ONLY; " if readonly else ""
             body = f"{pre}{sql.strip().rstrip(';')};\nSELECT ROW_COUNT() AS {_MARK};"
@@ -384,7 +446,7 @@ class MySQL(SQL):
         path = self.upload(data)
         try:
             client = " ".join(self._client("client"))
-            db = database or self.database() or ""
+            db = self._db(database) or ""
             sh = (f'for b in {client}; do command -v $b >/dev/null && exec $b -u "$AISB_USER" '
                   f'--default-character-set=utf8mb4 {"$AISB_DB" if db else ""} < "$AISB_FILE"; done; exit 127')
             res = self.run(["sh", "-c", sh], env={"MYSQL_PWD": self.password(), "AISB_USER": self.user(),
@@ -411,7 +473,7 @@ class MySQL(SQL):
         if not cols:
             raise ServiceError(f"mysql: no table {table!r} (use `db tables` to list)")
         for c in cols:
-            c["nullable"] = c["nullable"] == "1"
+            c["nullable"] = str(c["nullable"]) == "1"  # infer() has made "1" an int
         indexes = self._describe_rows(
             "select index_name as name, non_unique = 0 as `unique`, "
             "group_concat(column_name order by seq_in_index) as columns from information_schema.statistics "
@@ -425,9 +487,11 @@ class MySQL(SQL):
 
     def dump(self, sink: Callable[[bytes], object], *, database: str | None = None, schema_only: bool = False,
              tables: list[str] | None = None, clean: bool = False) -> None:
-        db = database or self.database()  # mysqldump always emits DROP TABLE IF EXISTS, so `clean` is implied
+        db = self._db(database)  # mysqldump always emits DROP TABLE IF EXISTS, so `clean` is implied
         if not db:
             raise ValueError("mysql dump needs --database (no MYSQL_DATABASE in the container env)")
+        if bad := [t for t in tables or [] if t.startswith("-")]:  # positional names, else read as options
+            raise ValueError(f"mysql: invalid table names {bad}")
         args = ["-u", self.user(), "--single-transaction", "--routines", "--triggers", "--no-tablespaces",
                 *(["--no-data"] if schema_only else []), db, *(tables or [])]
         err = bytearray()

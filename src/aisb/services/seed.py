@@ -41,7 +41,8 @@ class TableMeta:
 
 def normalize(data_type: str, udt: str = "") -> str:
     t = (data_type or "").lower()
-    for key, norm in (("smallint", "smallint"), ("tinyint(1)", "bool"), ("bigint", "bigint"), ("int", "int"),
+    for key, norm in (("interval", "time"),  # before "int"; '12:34:00' is a valid interval literal
+                      ("smallint", "smallint"), ("tinyint(1)", "bool"), ("bigint", "bigint"), ("int", "int"),
                       ("serial", "int"), ("numeric", "numeric"), ("decimal", "numeric"), ("double", "float"),
                       ("real", "float"), ("float", "float"), ("bool", "bool"), ("timestamp", "timestamp"),
                       ("datetime", "timestamp"), ("date", "date"), ("time", "time"), ("json", "json"), ("uuid", "uuid"),
@@ -52,16 +53,22 @@ def normalize(data_type: str, udt: str = "") -> str:
     return "text" if udt in ("citext", "name") else "other"
 
 
-_ANY_ARRAY = re.compile(r"\(?\(?(\w+)\)?(?:::\w+)? = ANY \(\(?ARRAY\[(.*?)\]")
-_IN_LIST = re.compile(r"`?(\w+)`?\s+in\s*\((.*?)\)", re.I)
+_Q = r"'(?:[^']|'')*'"  # a quoted literal, which may itself contain ] ) , or ''
+_ANY_ARRAY = re.compile(r"\(?\(?(\w+)\)?(?:::\w+)? = ANY \(\(?ARRAY\[((?:" + _Q + r"|[^\]'])*)\]")
+_IN_LIST = re.compile(r"`?(\w+)`?\s+in\s*\(((?:" + _Q + r"|[^)'])*)\)", re.I)
 _MIN = re.compile(r"\(?`?(\w+)`?\s*(>=|>)\s*\(?'?(-?\d+(?:\.\d+)?)")
+
+
+def _quoted(text: str) -> tuple[str, ...]:
+    """The SQL string literals in text, unescaped ('it''s' -> it's), so they round-trip through literal()."""
+    return tuple(v.replace("''", "'") for v in re.findall(r"'((?:[^']|'')*)'", text))
 
 
 def apply_check(meta: TableMeta, clause: str) -> None:
     """Understand the common CHECK shapes: `col IN (...)` / `col = ANY (ARRAY[...])` and `col >= n`."""
     for rx in (_ANY_ARRAY, _IN_LIST):
         if (m := rx.search(clause)) and m.group(1) in meta.columns:
-            meta.columns[m.group(1)].choices = tuple(re.findall(r"'((?:[^']|'')*)'", m.group(2)))
+            meta.columns[m.group(1)].choices = _quoted(m.group(2))
             return
     if (m := _MIN.search(clause)) and m.group(1) in meta.columns:
         meta.columns[m.group(1)].minimum = float(m.group(3)) + (1 if m.group(2) == ">" else 0)
@@ -107,7 +114,7 @@ def introspect(db: SQL, database: str | None = None) -> dict[str, TableMeta]:
             database=database).rows
         for t, name, dtype, ctype, nullable, default, extra, maxlen, prec, scale in cols:
             m = metas.setdefault(t, TableMeta())
-            choices = tuple(re.findall(r"'((?:[^']|'')*)'", ctype)) if ctype.startswith(("enum(", "set(")) else ()
+            choices = _quoted(ctype) if ctype.startswith(("enum(", "set(")) else ()
             m.columns[name] = Column(name, normalize(ctype if ctype.startswith("tinyint(1)") else dtype),
                                      # MariaDB reports "no default" on nullable columns as the string 'NULL'
                                      nullable == "YES", default not in (None, "NULL") or "auto_increment" in (extra or ""),

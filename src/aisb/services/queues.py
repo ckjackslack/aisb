@@ -150,13 +150,16 @@ class RabbitMQ(Adapter):
             host, hport = self.t.ips[0], port
         else:
             raise ServiceError("rabbitmq: management API not reachable (use a *-management image)")
+        path = f"/api/queues/{quote(vhost, safe='')}/{quote(queue, safe='')}/get"
+        if self.ctr.t.planning:  # --dry-run: the get requeues (reorders, flags redelivered), so only plan it
+            self.ctr.t.note(request=f"POST http://{host}:{hport}{path}", ackmode="ack_requeue_true", count=limit)
+            return []
         host, hport = self.ctr.t.reach(host, hport)
         conn = http.client.HTTPConnection(host, hport, timeout=10)
         auth = base64.b64encode(f"{self.user()}:{self.password()}".encode()).decode()
         body = json.dumps({"count": limit, "ackmode": "ack_requeue_true", "encoding": "auto", "truncate": 50000})
         try:
-            conn.request("POST", f"/api/queues/{quote(vhost, safe='')}/{quote(queue, safe='')}/get", body=body,
-                         headers={"Authorization": f"Basic {auth}", "Content-Type": "application/json"})
+            conn.request("POST", path, body=body, headers={"Authorization": f"Basic {auth}", "Content-Type": "application/json"})
             resp = conn.getresponse()
             data = resp.read()
         except OSError as e:

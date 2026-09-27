@@ -48,6 +48,8 @@ class Mongo(Adapter):
                     **{f"AISB_{k.upper()}": v for k, v in env.items()}}
         res = self.run(["mongosh", "--quiet", "--norc", "--eval", _PRELUDE % body], env=full_env, check=False)
         out = res.stdout
+        if res.code is None and not out:  # --dry-run: the exec was only planned
+            return None
         if "__AISB__" not in out:
             if res.code in (126, 127) or "executable file not found" in out + res.stderr:
                 raise ServiceError("mongo: mongosh not found in container (images older than mongo:6 ship only the legacy shell)")

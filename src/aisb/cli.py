@@ -75,7 +75,9 @@ def build_parser() -> argparse.ArgumentParser:
             for prm in o.params:
                 _add_param(p, prm)
             p.set_defaults(_op=o, **_config_defaults(o))
-    resources.add_parser("docs", help="print the Markdown command reference").set_defaults(_op=None)
+    docs = resources.add_parser("docs", help="print the Markdown command reference (or --site DIR: one page per resource)")
+    docs.add_argument("--site", metavar="DIR", help="write index.md + one page per resource into DIR")
+    docs.set_defaults(_op=None)
     resources.add_parser("mcp", help="run the MCP server over stdio (see `aisb mcp --help`)")
     resources.add_parser("bundle", help="write aisb as one executable .pyz (see `aisb bundle --help`)")
     resources.add_parser("portal", help="local web UI, read-only by default (see `aisb portal --help`)")
@@ -163,7 +165,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return importlib.import_module(special[argv[0]], __package__).main(argv[1:])
     args = parse(argv)
     if args._op is None:
-        sys.stdout.write(render_markdown())
+        if getattr(args, "site", None):
+            from .ops import render_site
+            files = render_site(args.site)
+            sys.stdout.write(json.dumps({"site": args.site, "pages": len(files)}) + "\n")
+        else:
+            sys.stdout.write(render_markdown())
         return EXIT_OK
     try:
         return run(args._op, args, sys.stdout, sys.stderr)

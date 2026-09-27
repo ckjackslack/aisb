@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: ruff check src tests
+      - run: mypy
+      - name: generated docs are current
+        run: |
+          python -m aisb docs > /tmp/commands.md
+          diff -u .claude/skills/docker/references/commands.md /tmp/commands.md
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev,pyinfra]"
+      - name: pull images used by the live tests
+        run: |
+          for i in alpine:3.20 busybox:1.36 nginx:alpine redis:7-alpine postgres:16-alpine; do docker pull -q "$i"; done
+      - name: unit + live tests (the runner has a Docker daemon)
+        run: pytest -q
+
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e .
+      - run: aisb bundle aisb.pyz
+      - name: the bundle runs with nothing but the stdlib
+        run: python3 -I aisb.pyz docs > /dev/null && python3 -I aisb.pyz --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aisb.pyz
+          path: aisb.pyz

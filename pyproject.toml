@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aisb"
-version = "0.1.0"
+dynamic = ["version"]
 description = "stdlib-only Docker Engine API client with an agent-friendly CLI and Claude Code skill"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10"]
 pyinfra = ["pyinfra>=3.1"]
 
 [project.scripts]
@@ -19,6 +19,9 @@ aisb = "aisb.cli:main"
 
 [project.entry-points."pyinfra.connectors"]
 aisb = "aisb.contrib.pyinfra.connector:AisbConnector"
+
+[tool.setuptools.dynamic]
+version = {attr = "aisb.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]

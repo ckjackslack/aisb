@@ -1,0 +1,27 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: version tag matches the package
+        run: |
+          pip install -e .
+          test "v$(python -c 'import aisb; print(aisb.__version__)')" = "$GITHUB_REF_NAME"
+      - run: pip install build && python -m build
+      - run: aisb bundle dist/aisb.pyz && sha256sum dist/* > dist/SHA256SUMS
+      - name: publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "aisb $GITHUB_REF_NAME" --generate-notes

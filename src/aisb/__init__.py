@@ -9,4 +9,4 @@ __all__ = [
     "APIError", "Conflict", "Docker", "DockerError", "DockerUnavailable", "NotFound", "NotModified",
     "RunSpec", "Tier", "get_op", "invoke", "registry",
 ]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

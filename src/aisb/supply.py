@@ -29,8 +29,23 @@ class SupplyError(ValueError):
     pass
 
 
+class _SameOriginAuth(urllib.request.HTTPRedirectHandler):
+    """Follow redirects, but never carry the Authorization header (a registry token or the docker login) to
+    another origin: urllib's default handler copies every header to wherever the Location points."""
+
+    def redirect_request(self, req: urllib.request.Request, fp: Any, code: int, msg: str, headers: Any,
+                         newurl: str) -> urllib.request.Request | None:
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        old_origin, new_origin = urllib.parse.urlsplit(req.full_url), urllib.parse.urlsplit(newurl)
+        if new is not None and (old_origin.scheme, old_origin.netloc) != (new_origin.scheme, new_origin.netloc):
+            new.remove_header("Authorization")
+        return new
+
+
 def _open(req: urllib.request.Request, timeout: float = 20) -> Any:
-    return urllib.request.urlopen(req, timeout=timeout, context=ssl.create_default_context())
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+                                         _SameOriginAuth)
+    return opener.open(req, timeout=timeout)
 
 
 def _json(url: str, body: Any | None = None, *, timeout: float = 30) -> Any:

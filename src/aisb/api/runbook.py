@@ -163,7 +163,7 @@ class RunbookOps(Resource, name="runbook"):
             with context.use(source="runbook"):
                 res = invoke(self._client(), o, kwargs, dry_run=True)
             return {**out, "planned": res.planned, **({"warnings": res.warnings} if res.warnings else {})}
-        except (DockerError, ValueError) as e:
+        except (DockerError, ValueError, OSError) as e:  # same failures _exec reports: a plan shows them per step
             return {**out, "plan_error": str(e)}
 
     def _exec(self, argv: list[str], run_id: str) -> tuple[bool, Any, str | None]:

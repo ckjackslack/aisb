@@ -427,7 +427,11 @@ class Fleet(Resource, name="fleet"):
             out = []
             for line in text.splitlines():
                 ts, _, msg = line.partition(" ")
-                if (t := docker_time(ts)) is None or (t, msg) in seen[h.name] or (rx and not rx.search(msg)):
+                try:
+                    t = docker_time(ts)
+                except ValueError:  # a fragment of a line split at \r / \f etc.: no timestamp of its own
+                    t = None
+                if t is None or (t, msg) in seen[h.name] or (rx and not rx.search(msg)):
                     continue
                 seen[h.name].add((t, msg))
                 out.append((t, h.name, msg))

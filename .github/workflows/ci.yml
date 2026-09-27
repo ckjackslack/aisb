@@ -38,7 +38,7 @@ jobs:
       - run: pip install -e ".[dev,pyinfra]"
       - name: pull images used by the live tests
         run: |
-          for i in alpine:3.20 busybox:1.36 nginx:alpine redis:7-alpine postgres:16-alpine mariadb:11; do docker pull -q "$i"; done
+          for i in alpine:3.20 busybox:1.36 nginx:alpine redis:7-alpine postgres:16-alpine mariadb:11 mysql:8.4; do docker pull -q "$i"; done
       - name: unit + live tests with branch coverage (the runner has a Docker daemon)
         run: pytest -q --cov --cov-report=term --cov-report=xml
       - uses: actions/upload-artifact@v4

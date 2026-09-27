@@ -224,6 +224,7 @@ def test_lit_backslash_modes():
     "select 'a\\' \\! id'",              # NO_BACKSLASH_ESCAPES splits this string differently
     "/* \\! id */ select 1", "# \\! id\nselect 1", "select 1;\nconnect other", "select 1;\nresetconnection",
     "delimiter //\nselect 1//",
+    "select 1; system id", "select 1;system id", "select 1;  tee /tmp/o",  # mysql 8.4 runs these (same line)
 ])
 def test_mysql_client_commands_are_found(sql):
     assert mysql_client_command(sql) is not None

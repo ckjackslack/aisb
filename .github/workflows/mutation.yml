@@ -1,0 +1,59 @@
+name: mutation
+
+# Mutation testing of the safety core (see docs/testing.md): weekly and on demand, not on every push (it takes a
+# while). Each target fails when its mutation score drops below the floor; surviving mutants are in the artifact.
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mutate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - "aisb.policy*"
+          - "aisb.audit*"
+          - "aisb.ops.x_invoke*"
+          - "aisb.api.session*"
+          - "aisb.api.chaos*"
+          - "aisb.redact*"
+          - "aisb.services.sql.x_mysql_client_command*"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev,pyinfra]"
+      - name: mutmut run ${{ matrix.target }}
+        run: mutmut run "${{ matrix.target }}" || true   # the score gate below decides
+      - name: score (floor 90% of the mutants that were run)
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          mutmut results --all true > results.txt || true
+          python - <<'PY'
+          import fnmatch, os, re, sys
+          target = os.environ["TARGET"]
+          rows = [l.strip().rsplit(": ", 1) for l in open("results.txt") if ": " in l]
+          mine = [(n, s) for n, s in rows if fnmatch.fnmatch(n, target)]
+          killed = sum(s in ("killed", "timeout") for _, s in mine)
+          survived = [n for n, s in mine if s == "survived"]
+          tested = killed + len(survived)
+          score = 100 * killed / tested if tested else 0
+          print(f"{target}: {killed}/{tested} killed ({score:.1f}%)")
+          for n in survived:
+              print("  survived:", n)
+          sys.exit(0 if tested and score >= 90 else 1)
+          PY
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-${{ strategy.job-index }}
+          path: results.txt

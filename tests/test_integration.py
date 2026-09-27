@@ -316,3 +316,53 @@ def test_readonly_role_is_enforced_by_the_server(docker, service, image, env, ta
     assert out["access"] == "role aisb_ro" and out["rows"] == [{"n": 2}]
     invoke(docker, get_op("db.revoke-readonly"), {"ref": db}, confirm=True)
     assert docker.db.query(db, "select 1 as ok")["access"] == "read-only session"
+
+
+# --- the SQL client guards, checked against the real client binaries ------------------------------------------
+
+def _payloads(cmd: str) -> list[str]:
+    """SQL where a client command hides in strings, comments or statement positions, in many shapes."""
+    shapes = ["{c}", "SELECT 1;\n{c}", "SELECT 1; {c}", "SELECT 1;\n  {c}", "SELECT '{c}'", "SELECT \"{c}\"",
+              "SELECT 'a\\';\n{c}'", "SELECT 'a'';\n{c}'", "SELECT 1 -- x\n;\n{c}", "SELECT 1 # x\n;\n{c}",
+              "SELECT 1 /* {c} */", "SELECT 1; /* x */\n{c}", "SELECT `a;\n{c}` FROM t", "SELECT 'a' \\\n{c}",
+              "SELECT 1\n{c}", "SELECT 1;{c}", "select 1;\n\n{c}\n", "SELECT 'it''s';\n{c}", "SELECT \"a\\\"\";\n{c}"]
+    return [s.format(c=cmd) for s in shapes]
+
+
+@pytest.mark.parametrize("image", ["mariadb:11", "mysql:8.4"])
+def test_mysql_client_command_guard_is_sound_against_the_real_client(docker, service, image):
+    from aisb.services.sql import mysql_client_command
+    env = ["MARIADB_ROOT_PASSWORD=pw"] if image.startswith("mariadb") else ["MYSQL_ROOT_PASSWORD=pw"]
+    db = service(image, env=env)
+    assert docker.svc.ready(db, within=180, stable=1)["ok"]
+    client = "mariadb" if image.startswith("mariadb") else "mysql"
+    ran, over_cautious = [], []
+    for i, sql in enumerate(p for cmd in ("\\! touch /tmp/s{i}", "system touch /tmp/s{i}") for p in _payloads(cmd)):
+        sql = sql.replace("{i}", str(i))
+        docker.containers.exec_(db, client, "-uroot", "-ppw", "-e", sql)          # as admin, no guard: what runs?
+        executed = docker.containers.exec_(db, "sh", "-c", f"test -e /tmp/s{i} && echo yes")["output"] == "yes\n"
+        flagged = mysql_client_command(sql) is not None
+        if executed:
+            ran.append(sql)
+            assert flagged, f"the real {client} ran a shell for SQL the guard lets through: {sql!r}"
+        elif flagged:
+            over_cautious.append(sql)
+    assert ran, "the corpus must contain shapes the client really executes"
+    assert len(over_cautious) <= len(ran) * 2  # conservative is fine, paranoid would make the guard useless
+
+
+def test_psql_meta_command_guard_is_sound_against_the_real_client(docker, service):
+    db = service("postgres:16-alpine", env=["POSTGRES_PASSWORD=pw"])
+    assert docker.svc.ready(db, within=120, stable=1)["ok"]
+    ran = []
+    for i, sql in enumerate(_payloads("\\! touch /tmp/s{i}") + ["\t\\! touch /tmp/s{i}", "\n\\! touch /tmp/s{i}"]):
+        sql = sql.replace("{i}", str(i))
+        docker.containers.exec_(db, "psql", "-X", "-U", "postgres", "-c", sql)
+        executed = docker.containers.exec_(db, "sh", "-c", f"test -e /tmp/s{i} && echo yes")["output"] == "yes\n"
+        refused = sql.lstrip().startswith("\\")                               # the guard in Postgres.query
+        if executed:
+            ran.append(sql)
+            assert refused, f"psql ran a shell for SQL the guard lets through: {sql!r}"
+    assert ran
+    with pytest.raises(ValueError, match="meta-commands"):
+        docker.db.query(db, "\\! touch /tmp/never")

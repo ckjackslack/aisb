@@ -27,7 +27,7 @@ _MARK = "__aisb_rows__"
 
 
 # mysql-client commands that act outside the server (shell, files, reconnect); the long forms are recognized
-# at the start of a line when no statement is pending
+# wherever a statement starts (mysql 8.4 runs them after `;` on the same line, not only at a line start)
 _MYSQL_LONG_CMD = re.compile(r"[ \t\r]*(system|source|tee|pager|edit|connect|resetconnection|delimiter|charset)\b", re.I)
 
 
@@ -49,16 +49,15 @@ def mysql_client_command(sql: str) -> str | None:
     client splits strings), so neither reading can hide a command; a backslash inside a comment counts too.
     """
     for escapes in (True, False):
-        i, n, quote, line_start, idle = 0, len(sql), "", True, True
+        i, n, quote, idle = 0, len(sql), "", True
         while i < n:
             c = sql[i]
             if quote:
                 i += 2 if c == "\\" and escapes else 1
                 quote = "" if c == quote else quote
                 continue
-            if line_start and idle and (m := _MYSQL_LONG_CMD.match(sql, i)):
-                return m.group(1)
-            line_start = c == "\n"
+            if idle and (m := _MYSQL_LONG_CMD.match(sql, i)):  # at any statement start: mysql 8 runs
+                return m.group(1)                                # `SELECT 1; system id` from the same line
             if (end := _mysql_comment_end(sql, i)) is not None:
                 if "\\" in sql[i:end]:
                     return sql[i:end]

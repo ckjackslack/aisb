@@ -45,9 +45,25 @@ def _many(v: Any) -> list[str]:
     return [] if v is None else [str(x) for x in v] if isinstance(v, (list, tuple)) else [str(v)]
 
 
+_LOCAL = ("local", "all", "*")
+
+
+def _local_matches(expr: str) -> bool:
+    """A selector evaluated for the local endpoint, which has no groups or labels: it is selected by `local`,
+    `all` or `*` (or by exclusions alone), and removed by `!local`/`!all` or by any `&` intersection."""
+    from .fleet.inventory import _TERM
+    terms = [(op, atom.strip()) for op, atom in _TERM.findall(expr) if atom.strip()]
+    plain = [atom for op, atom in terms if op not in ("&", "!", "&!")]
+    chosen = any(a in _LOCAL for a in plain) if plain else True
+    for op, atom in terms:
+        if op == "&" and atom not in _LOCAL or op in ("!", "&!") and atom in _LOCAL:
+            chosen = False
+    return chosen
+
+
 def _host_matches(expr: str, ctx: Ctx) -> bool:
     if ctx.host is None:
-        return any(t.strip() in ("local", "all", "*") for t in expr.split(",") if not t.strip().startswith("!"))
+        return _local_matches(expr)
     from .fleet.inventory import Inventory
     try:
         inv = Inventory.load()

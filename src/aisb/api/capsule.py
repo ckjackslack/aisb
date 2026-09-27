@@ -122,6 +122,9 @@ class Capsule(Resource, name="capsule"):
             if manifest.get("aisb_capsule") != VERSION:
                 raise ValueError(f"{file} is not an aisb capsule")
             spec_d = json.loads(read("spec.json") or b"{}")
+            if absent := [f"volumes/{m['index']}.tar" for m in manifest.get("mounts", [])
+                          if f"volumes/{m['index']}.tar" not in members]:  # before any change: no half-restored copy
+                raise ValueError(f"{file} is incomplete: missing {', '.join(absent)}")
             if "image.tar" in members:
                 self.t.json("POST", "/images/load", data=read("image.tar"), content_type="application/x-tar",
                             timeout=None)

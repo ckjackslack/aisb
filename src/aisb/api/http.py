@@ -102,7 +102,8 @@ class Http(Resource, name="http"):
             body = Path(data[1:]).expanduser().read_bytes() if data.startswith("@") else data.encode()
         if self.t.planning:
             host, hport, via = self.resolve(ref, port)
-            safe = {k: "***" if SECRET_KEY.search(k) else v for k, v in headers.items()}
+            from ..insights.traffic import SENSITIVE  # Cookie, X-Api-Key... are not caught by the env-style SECRET_KEY
+            safe = {k: "***" if SECRET_KEY.search(k) or SENSITIVE.match(k) else v for k, v in headers.items()}
             self.t.note(http=method.upper(), url=f"{'https' if https else 'http'}://{host}:{hport}{path}", via=via,
                         headers=safe, body_bytes=len(body or b""))
             return {}

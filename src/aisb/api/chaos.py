@@ -43,7 +43,8 @@ class Chaos(Resource, name="chaos"):
     def _hold(self, seconds: float, inject: Callable[[], None], revert: Callable[[], None]) -> None:
         inject()
         try:
-            time.sleep(seconds)
+            if not self.t.planning:  # a dry-run records inject + revert without holding the caller
+                time.sleep(seconds)
         finally:
             revert()  # always, even on Ctrl-C
 
@@ -60,20 +61,36 @@ class Chaos(Resource, name="chaos"):
         """Partition: detach the container from its network(s), then reconnect with the original DNS aliases."""
         info = self.t.json("GET", f"/containers/{q(ref)}/json")
         cid = info.get("Id", ref)
-        nets = {n: [a for a in ep.get("Aliases") or [] if not cid.startswith(a)]
+        nets = {n: [a for a in ep.get("Aliases") or [] if not (len(a) >= 12 and cid.startswith(a))]  # short id
                 for n, ep in ((info.get("NetworkSettings") or {}).get("Networks") or {}).items()
                 if (network is None and n not in ("host", "none")) or n == network}
         if not nets:
             raise ValueError(f"{ref} is not attached to {network or 'any network'}")
 
+        done: list[str] = []
+
         def cut() -> None:
-            for n in nets:
-                self.t.json("POST", f"/networks/{q(n)}/disconnect", body={"Container": cid, "Force": True})
+            try:
+                for n in nets:
+                    self.t.json("POST", f"/networks/{q(n)}/disconnect", body={"Container": cid, "Force": True})
+                    done.append(n)
+            except BaseException as e:
+                try:
+                    heal()  # a partial cut is still a fault: reconnect what was already detached
+                except Exception as h:
+                    e.add_note(f"revert also failed: {h}")
+                raise
 
         def heal() -> None:
-            for n, aliases in nets.items():
-                self.t.json("POST", f"/networks/{q(n)}/connect",
-                            body={"Container": cid, "EndpointConfig": {"Aliases": aliases}})
+            first: BaseException | None = None
+            for n in done:  # try every network even if one fails, then report the first failure
+                try:
+                    self.t.json("POST", f"/networks/{q(n)}/connect",
+                                body={"Container": cid, "EndpointConfig": {"Aliases": nets[n]}})
+                except Exception as e:
+                    first = first or e
+            if first is not None:
+                raise first
         self._hold(seconds, cut, heal)
         return {"fault": "disconnect", "container": ref, "networks": list(nets), "seconds": seconds, "reverted": True}
 
@@ -91,19 +108,26 @@ class Chaos(Resource, name="chaos"):
         spec = RunSpec(image=image, cmd=("sh", "-c", script), network=f"container:{target}", cap_add=("NET_ADMIN",),
                        labels={"aisb.chaos": ref})
         cid = ctr.create_from(spec)
+        status: dict[str, Any] = {}
+        out: dict[str, Any] = {}
+        failed = True
         try:
             self.t.json("POST", f"/containers/{cid}/start")
             status = self.t.json("POST", f"/containers/{cid}/wait", timeout=None) or {}
             out = ctr.logs(cid, tail=0)
+            failed = False
         finally:
-            self.t.json("DELETE", f"/containers/{cid}", query={"force": True})
-        if "reverted" not in out.get("output", "") and not self.t.planning:  # interrupted: clean up the qdisc
-            fix = RunSpec(image=image, cmd=("sh", "-c", "for i in $(ls /sys/class/net | grep -v '^lo$'); do tc qdisc del dev $i root; done"),
-                          network=f"container:{target}", cap_add=("NET_ADMIN",))
-            fid = ctr.create_from(fix)
-            self.t.json("POST", f"/containers/{fid}/start")
-            self.t.json("POST", f"/containers/{fid}/wait", timeout=None)
-            self.t.json("DELETE", f"/containers/{fid}", query={"force": True})
+            try:
+                self.t.json("DELETE", f"/containers/{cid}", query={"force": True})
+            finally:
+                # Interrupted or failed (incl. Ctrl-C / a broken wait, where removing the sidecar kills it before
+                # its own revert): clean up the qdisc. Never let a cleanup error mask the original one.
+                if "reverted" not in out.get("output", "") and not self.t.planning:
+                    try:
+                        self._untc(ctr, image, target)
+                    except Exception:
+                        if not failed:
+                            raise
         if status.get("StatusCode") not in (0, None):
             text = out.get("output", "").strip()
             hint = (" (the Docker host kernel has no sch_netem module: `modprobe sch_netem` on the host, "
@@ -111,6 +135,16 @@ class Chaos(Resource, name="chaos"):
             raise ValueError(f"tc failed in the sidecar: {text[-300:]}{hint}")
         return {"fault": "latency", "container": ref, "netem": netem, "seconds": seconds,
                 "injected": "injected" in out.get("output", "") or self.t.planning, "reverted": True}
+
+    def _untc(self, ctr: Containers, image: str, target: str) -> None:
+        fix = RunSpec(image=image, cmd=("sh", "-c", "for i in $(ls /sys/class/net | grep -v '^lo$'); do tc qdisc del dev $i root; done"),
+                      network=f"container:{target}", cap_add=("NET_ADMIN",))
+        fid = ctr.create_from(fix)
+        try:
+            self.t.json("POST", f"/containers/{fid}/start")
+            self.t.json("POST", f"/containers/{fid}/wait", timeout=None)
+        finally:
+            self.t.json("DELETE", f"/containers/{fid}", query={"force": True})
 
     @op(Tier.MUTATE)
     def kill(self, ref: Ref, *, signal: Annotated[str, "signal to send"] = "KILL") -> dict[str, Any]:
@@ -149,20 +183,33 @@ class Chaos(Resource, name="chaos"):
                 action = {"pause": lambda target=target: self.pause(target, seconds=seconds),
                           "disconnect": lambda target=target: self.disconnect(target, seconds=seconds),
                           "latency": lambda target=target: self.latency(target, ms=300, seconds=seconds)}[fault]
-                worker = threading.Thread(target=action, daemon=True)
+                failure: list[BaseException] = []
+
+                def guarded(action: Callable[[], Any] = action, failure: list[BaseException] = failure) -> None:
+                    try:
+                        action()
+                    except BaseException as e:  # reported on the card; the fault reverts itself on failure
+                        failure.append(e)
+                worker = threading.Thread(target=guarded, daemon=True)
                 worker.start()
                 affected: set[str] = set()
                 detected = False
-                time.sleep(min(1.0, seconds / 4))
-                while worker.is_alive():
-                    for m, c in members.items():
-                        ok, _ = self.healthy(c)
-                        if not ok:
-                            detected |= m == name
-                            if m != name:
-                                affected.add(m)
-                    time.sleep(0.5)
-                worker.join()
+                try:
+                    time.sleep(min(1.0, seconds / 4))
+                    while worker.is_alive():
+                        for m, c in members.items():
+                            ok, _ = self.healthy(c)
+                            if not ok:
+                                detected |= m == name
+                                if m != name:
+                                    affected.add(m)
+                        time.sleep(0.5)
+                finally:
+                    worker.join()  # never exit (Ctrl-C, probe error) while the daemon-thread fault is still applied
+                if failure:
+                    card.append({"service": name, "fault": fault,
+                                 "skipped": f"fault failed: {type(failure[0]).__name__}: {failure[0]}"[:300]})
+                    continue
                 started, recovered = time.monotonic(), False
                 while time.monotonic() - started < recover_within:
                     if all(self.healthy(c)[0] for c in members.values()):

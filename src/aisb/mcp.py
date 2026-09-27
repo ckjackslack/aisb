@@ -37,6 +37,8 @@ def describe(o: Op) -> dict[str, Any]:
     if o.tier is Tier.DESTROY:
         props["confirm"] = {"type": "boolean",
                             "description": "execute; only after the user explicitly approved this exact action"}
+    if o.tier is not Tier.READ:
+        props["ticket"] = {"type": "string", "description": "change ticket, when the operator's policy requires one"}
     return {
         "name": tool_name(o),
         "description": f"[{o.tier}] {o.doc or o.summary}",
@@ -62,10 +64,19 @@ class Server:
         o = self.tools.get(name)
         if o is None:
             return _text({"error": f"unknown tool {name!r}"}, error=True)
+        from . import config, context
+        from .policy import PolicyDenied
         args = dict(args or {})
         dry_run, confirm = bool(args.pop("dry_run", False)), bool(args.pop("confirm", False))
+        ticket = args.pop("ticket", None)
+        names = {p.name for p in o.params}
+        args = {**{k: v for k, v in config.load().defaults_for(o.qualname).items() if k in names}, **args}
         try:
-            outcome = invoke(self.client, o, args, dry_run=dry_run, confirm=confirm)
+            with context.use(source="mcp", ticket=ticket):
+                outcome = invoke(self.client, o, args, dry_run=dry_run, confirm=confirm)
+        except PolicyDenied as e:
+            return _text({**e.as_dict(), "hint": "Blocked by the operator's policy. Tell the user which rule; "
+                                                  "do not try to work around it."}, error=True)
         except DockerError as e:
             return _text(e.as_dict(), error=True)
         except (ValueError, TypeError) as e:

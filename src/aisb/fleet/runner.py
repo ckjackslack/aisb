@@ -1,5 +1,6 @@
 """Connect to a host's Docker (SSH tunnel, direct endpoint, or local) and fan work out over many hosts."""
 
+import contextvars
 import time
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -56,13 +57,16 @@ class HostResult:
 
 
 def _one(host: Host, fn: Callable[[Host], Any]) -> HostResult:
+    from .. import context
+    from ..policy import PolicyDenied
     t0 = time.monotonic()
     try:
-        res = fn(host)
+        with context.use(host=host):
+            res = fn(host)
         ok = not (isinstance(res, dict) and res.get("ok") is False)
         return HostResult(host.name, ok, int((time.monotonic() - t0) * 1000), res,
                           None if ok else str(res.get("reason") or res.get("error") or "condition not met"))
-    except (DockerError, Unreachable, ValueError, OSError) as e:
+    except (DockerError, Unreachable, ValueError, OSError, PolicyDenied) as e:
         msg = e.as_dict()["message"] if isinstance(e, DockerError) else str(e)
         if isinstance(e, (DockerUnavailable, ConnectionError)) and host.ssh:
             msg += f" (is Docker running on {host.name}, and may {host.ssh} open {host.socket}? docker group)"
@@ -82,7 +86,9 @@ def fan_out(hosts: Sequence[Host], fn: Callable[[Host], Any], *, parallel: int =
             if fail_fast and any(not r.ok for r in results):
                 skipped += [h.name for h in chunk]
                 continue
-            results += list(pool.map(lambda h: _one(h, fn), chunk))
+            # each worker runs in a copy of the caller's context (user, ticket, run id); _one adds the host
+            ctxs = [contextvars.copy_context() for _ in chunk]
+            results += list(pool.map(lambda pair: pair[0].run(_one, pair[1], fn), zip(ctxs, chunk)))
     return results, skipped
 
 

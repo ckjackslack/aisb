@@ -243,3 +243,23 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | apply | mutate | `aisb fleet apply TARGET [-- COMMAND...] [--parallel PARALLEL] [--batch BATCH] [--fail-fast] [--inventory INVENTORY] [--dry-run]` | Run a mutate op on every selected host; `--dry-run` returns each host's planned API calls. |
 | destroy | destroy | `aisb fleet destroy TARGET [-- COMMAND...] [--parallel PARALLEL] [--batch BATCH] [--fail-fast] [--inventory INVENTORY] [--dry-run] [--yes]` | Run a destroy op on every selected host. Without --yes: each host's plan, exit 3, nothing changed. |
 | shell | mutate | `aisb fleet shell TARGET [-- CMD...] [--sudo] [--seconds SECONDS] [--parallel PARALLEL] [--batch BATCH] [--fail-fast] [--max-bytes MAX_BYTES] [--inventory INVENTORY] [--dry-run]` | Run a command on the machines themselves over SSH (not in containers): `fleet shell @db -- df -h /var`. |
+
+## audit
+
+| op | tier | usage | summary |
+|---|---|---|---|
+| log | read | `aisb audit log [--since SINCE] [--action ACTION] [--user USER] [--on ON] [--failed] [--run RUN] [--limit LIMIT]` | Changes made through aisb (newest first): who, when, where, what (secrets redacted), outcome. |
+| verify | read | `aisb audit verify` | Check the audit log's hash chain: any edited, reordered or deleted record breaks it. |
+
+## policy
+
+| op | tier | usage | summary |
+|---|---|---|---|
+| rules | read | `aisb policy rules` | The effective policy rules (config + active profile). |
+| check | read | `aisb policy check [-- COMMAND...] [--on ON] [--source SOURCE] [--user USER]` | Would this command be allowed? Evaluates every rule without running anything. |
+
+## config
+
+| op | tier | usage | summary |
+|---|---|---|---|
+| show | read | `aisb config show` | Effective configuration: file, active profile, defaults, aliases, audit, notify sinks, plugins. |

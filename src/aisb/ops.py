@@ -138,6 +138,7 @@ class Op:
 
 
 _REGISTRY: dict[str, dict[str, Op]] = {}
+_RESOURCES: dict[str, type["Resource"]] = {}
 
 
 def op(tier: Tier, *, name: str | None = None) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -157,6 +158,7 @@ class Resource:
     def __init_subclass__(cls, *, name: str, **kw: Any) -> None:
         super().__init_subclass__(**kw)
         cls.name = name
+        _RESOURCES[name] = cls
         ops = _REGISTRY.setdefault(name, {})
         for func in vars(cls).values():
             if meta := getattr(func, "__aisb_op__", None):
@@ -171,8 +173,17 @@ class HasResources(Protocol):
 
 
 def registry() -> dict[str, dict[str, Op]]:
+    """Built-in resources in their curated order, then plugin resources (alphabetical)."""
+    from . import plugins
     from .api import ORDER  # importing the package registers every resource
-    return {name: _REGISTRY[name] for name in ORDER}
+    plugins.load()
+    extra = sorted(n for n in _REGISTRY if n not in ORDER and _REGISTRY[n])
+    return {name: _REGISTRY[name] for name in (*ORDER, *extra)}
+
+
+def resource_class(name: str) -> type["Resource"] | None:
+    registry()
+    return _RESOURCES.get(name)
 
 
 def get_op(qualname: str) -> Op:
@@ -202,17 +213,54 @@ HOOKS: list[Hook] = []
 
 def invoke(client: HasResources, op_: Op, kwargs: Mapping[str, Any], *,
            dry_run: bool = False, confirm: bool = False) -> Outcome:
-    """Run an op under its tier policy: DESTROY without confirm degrades to a preview."""
+    """Run an op under policy and its tier: DESTROY without confirm degrades to a preview.
+
+    Pipeline: policy (deny -> PolicyDenied; previews list violations instead) -> preview or
+    HOOKS (e.g. session capture) -> call -> audit record (mutate/destroy; reads when configured).
+    """
+    import time
+
+    from . import audit, context, policy
+    ctx = context.current()
     preview = op_.tier is not Tier.READ and (dry_run or (op_.tier is Tier.DESTROY and not confirm))
-    if not preview:
+    if preview:
+        violations = policy.check(_rules(), op_.qualname, op_.tier.value, kwargs, ctx)
+        with client.transport.dry_run() as planned:
+            result = op_.call(client, kwargs)
+        warnings = list(result.get("warnings") or []) if isinstance(result, Mapping) else []
+        warnings += [f"policy [{v.rule}] {v.reason}" + (" (warn only)" if v.mode == "warn" else " (would be DENIED)")
+                     for v in violations]
+        return Outcome("dry-run" if dry_run else "confirm", planned=[r.preview() for r in planned], warnings=warnings)
+    if ctx.run_id is None and op_.tier is not Tier.READ:  # one id per change; nested (fleet) calls share it
+        import uuid
+        with context.use(run_id=uuid.uuid4().hex[:12]):
+            return invoke(client, op_, kwargs, dry_run=dry_run, confirm=confirm)
+    endpoint = getattr(getattr(client.transport, "endpoint", None), "url", None)
+    t0 = time.monotonic()
+    try:
+        warned = policy.enforce(op_.qualname, op_.tier.value, kwargs, ctx)
         if op_.tier is not Tier.READ:
             for hook in HOOKS:  # e.g. session capture: record how to undo before the change happens
                 hook(client, op_, kwargs)
-        return Outcome("ok", op_.call(client, kwargs))
-    with client.transport.dry_run() as planned:
         result = op_.call(client, kwargs)
-    warnings = list(result.get("warnings") or []) if isinstance(result, Mapping) else []
-    return Outcome("dry-run" if dry_run else "confirm", planned=[r.preview() for r in planned], warnings=warnings)
+    except policy.PolicyDenied as e:
+        audit.record(op=op_.qualname, tier=op_.tier.value, args=kwargs, ctx=ctx, endpoint=endpoint, ok=False,
+                     error=str(e), ms=0, extra={"denied": True})
+        raise
+    except BaseException as e:
+        audit.record(op=op_.qualname, tier=op_.tier.value, args=kwargs, ctx=ctx, endpoint=endpoint, ok=False,
+                     error=f"{type(e).__name__}: {e}"[:500], ms=int((time.monotonic() - t0) * 1000))
+        raise
+    unmet = isinstance(result, Mapping) and result.get("ok") is False
+    audit.record(op=op_.qualname, tier=op_.tier.value, args=kwargs, ctx=ctx, endpoint=endpoint, ok=not unmet,
+                 error=str(result.get("reason"))[:500] if unmet and isinstance(result, Mapping) else None,
+                 ms=int((time.monotonic() - t0) * 1000))
+    return Outcome("ok", result, warnings=[f"policy [{v.rule}] {v.reason} (warn only)" for v in warned])
+
+
+def _rules() -> list[dict[str, Any]]:
+    from . import config
+    return config.load().policy
 
 
 def jsonable(obj: Any) -> Any:

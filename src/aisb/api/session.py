@@ -56,6 +56,9 @@ def capture(client: HasResources, o: Op, kwargs: Any) -> None:
     sid = current()
     if not sid or o.resource in SKIP:
         return
+    from .. import context
+    if context.current().host is not None:
+        return  # remote (fleet) changes are journaled per host; see capture_remote
     d = _dir(sid)
     session = state.read_json(d / "session.json") or {}
     artifacts = state.home("sessions", sid, "artifacts")

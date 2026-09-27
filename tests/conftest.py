@@ -181,6 +181,21 @@ def frame(stream: int, data: bytes) -> bytes:
     return bytes([stream, 0, 0, 0]) + len(data).to_bytes(4, "big") + data
 
 
+@pytest.fixture(autouse=True)
+def _isolated_state(tmp_path_factory, monkeypatch):
+    """Never touch the real ~/.aisb: audit log, config, inventory and sessions live in a temp home per test."""
+    from aisb import config, plugins
+    home = tmp_path_factory.mktemp("aisb-home")
+    monkeypatch.setenv("AISB_HOME", str(home))
+    monkeypatch.setenv("AISB_CONFIG", str(home / "config.toml"))
+    for var in ("AISB_PROFILE", "AISB_PLUGINS", "AISB_TICKET", "AISB_AUDIT"):
+        monkeypatch.delenv(var, raising=False)
+    config.reset()
+    plugins.reset()
+    yield
+    config.reset()
+
+
 @pytest.fixture
 def daemon() -> Iterator[FakeDaemon]:
     tmp = Path(tempfile.mkdtemp(prefix="aisb-", dir="/tmp"))  # short path: AF_UNIX limit ~108 bytes

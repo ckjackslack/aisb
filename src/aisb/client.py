@@ -21,8 +21,13 @@ class Docker:
 
     def resource(self, name: str) -> Resource:
         res = getattr(self, name, None)
-        if not isinstance(res, Resource):
+        if isinstance(res, Resource):
+            return res
+        from .ops import resource_class
+        if (cls := resource_class(name)) is None:  # plugin resources are instantiated on first use
             raise ValueError(f"unknown resource: {name}")
+        res = cls(self.transport)
+        setattr(self, name, res)
         return res
 
     def __enter__(self) -> "Docker":

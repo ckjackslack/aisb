@@ -8,7 +8,7 @@ from typing import Annotated, Any, Literal
 
 from ..fleet import health, runner
 from ..fleet.inventory import Host, Inventory
-from ..ops import Op, Resource, Tier, jsonable, op
+from ..ops import Op, Resource, Tier, invoke, jsonable, op
 from ..errors import NotFound
 from ..streams import iter_jsonl
 from ..util import clip, kv, q
@@ -307,18 +307,17 @@ class Fleet(Resource, name="fleet"):
         planning = self.t.planning and tier is not Tier.READ
 
         def one(h: Host) -> Any:
+            # each host goes through invoke(): policy (with this host's groups/labels), session capture, audit
             with runner.docker(h) as d:
                 if planning:
-                    with d.transport.dry_run() as planned:
-                        o.call(d, kwargs)
-                    return {"planned": [p.preview() for p in planned]}
-                return _plain(o.call(d, kwargs))
+                    res = invoke(d, o, kwargs, dry_run=True)
+                    return {"planned": res.planned, **({"warnings": res.warnings} if res.warnings else {})}
+                return _plain(invoke(d, o, kwargs, confirm=True).result)
         out = self._fan(Inventory.load(inventory).select(target), one, None, parallel=parallel, batch=batch,
                         fail_fast=fail_fast, flat=flat)
         if planning:
             for r in out["results"]:
-                self.t.note(host=r["host"], op=o.qualname,
-                            **({"planned": r["result"]["planned"]} if r["ok"] else {"error": r["error"]}))
+                self.t.note(host=r["host"], op=o.qualname, **(r["result"] if r["ok"] else {"error": r["error"]}))
         return {"op": o.qualname, **out}
 
     @op(Tier.MUTATE)

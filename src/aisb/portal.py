@@ -78,8 +78,13 @@ class Portal:
         if banned := sorted(HOST_PARAMS & args.keys()):
             return 403, {"error": f"host-file arguments are not accepted by the portal: {', '.join(banned)}"}
         dry_run = bool(args.pop("dry_run", False))
+        from . import context
+        from .policy import PolicyDenied
         try:
-            outcome = invoke(self.factory(), o, args, dry_run=dry_run)
+            with context.use(source="portal"):
+                outcome = invoke(self.factory(), o, args, dry_run=dry_run)
+        except PolicyDenied as e:
+            return 403, e.as_dict()
         except DockerError as e:
             return 502, e.as_dict()
         except (ValueError, TypeError) as e:

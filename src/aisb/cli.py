@@ -1,20 +1,23 @@
 """`aisb RESOURCE OP [args]`: argparse generated from the operation registry.
 
 Exit codes: 0 ok, 1 Docker error, 2 usage error, 3 confirmation required,
-4 condition not met (a result with "ok": false, e.g. `containers wait`), 130 interrupted.
+4 condition not met (a result with "ok": false, e.g. `containers wait`), 5 denied by policy, 130 interrupted.
 """
 
 import argparse
 import json
+import os
+import shlex
 import sys
 from collections.abc import Mapping, Sequence
 from typing import Any, TextIO
 
 from .client import Docker
 from .errors import DockerError
-from .ops import Op, Param, Tier, invoke, jsonable, registry, render_markdown
+from .ops import Op, Param, Tier, invoke, registry, render_markdown
+from .render import FORMATS
 
-EXIT_OK, EXIT_DOCKER, EXIT_USAGE, EXIT_CONFIRM, EXIT_UNMET = 0, 1, 2, 3, 4
+EXIT_OK, EXIT_DOCKER, EXIT_USAGE, EXIT_CONFIRM, EXIT_UNMET, EXIT_POLICY = 0, 1, 2, 3, 4, 5
 
 
 def _add_param(p: argparse.ArgumentParser, prm: Param) -> None:
@@ -38,6 +41,14 @@ def _add_param(p: argparse.ArgumentParser, prm: Param) -> None:
                            default=prm.default, metavar=prm.name.upper(), **kw)
 
 
+def _config_defaults(o: Op) -> dict[str, Any]:
+    """Flag defaults from config.toml, limited to the op's own parameters (typos are reported, not applied)."""
+    from . import config
+    wanted = config.load().defaults_for(o.qualname)
+    names = {p.name for p in o.params}
+    return {k.replace("-", "_"): v for k, v in wanted.items() if k.replace("-", "_") in names}
+
+
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     g = common.add_argument_group("connection/output")
@@ -45,6 +56,9 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--timeout", type=float, default=60.0, help="request timeout in seconds")
     g.add_argument("--json", action=argparse.BooleanOptionalAction, default=None,
                    help="JSON output (default when stdout is not a TTY)")
+    g.add_argument("--output", "-o", choices=FORMATS, help="output format (overrides --json)")
+    g.add_argument("--pick", metavar="PATHS", help="only these dotted fields, per row: name,state,result.ok")
+    g.add_argument("--ticket", help="change ticket for policy/audit (default: $AISB_TICKET)")
 
     root = argparse.ArgumentParser(prog="aisb", description="stdlib-only Docker Engine API client")
     resources = root.add_subparsers(dest="resource", required=True, metavar="RESOURCE")
@@ -59,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
                 p.add_argument("--yes", action="store_true", help="confirm; only after explicit user approval")
             for prm in o.params:
                 _add_param(p, prm)
-            p.set_defaults(_op=o)
+            p.set_defaults(_op=o, **_config_defaults(o))
     resources.add_parser("docs", help="print the Markdown command reference").set_defaults(_op=None)
     resources.add_parser("mcp", help="run the MCP server over stdio (see `aisb mcp --help`)")
     resources.add_parser("bundle", help="write aisb as one executable .pyz (see `aisb bundle --help`)")
@@ -67,43 +81,25 @@ def build_parser() -> argparse.ArgumentParser:
     return root
 
 
-def _table(rows: list[dict[str, Any]]) -> str:
-    keys = dict.fromkeys(k for r in rows for k in r)  # union, first-seen order: rows may differ (e.g. a host that's down)
-    sample = {k: next(r[k] for r in rows if k in r) for k in keys}
-    # scalars and lists of scalars fit a cell; nested objects don't
-    cols = [k for k, v in sample.items()
-            if not isinstance(v, dict) and not (isinstance(v, list) and any(isinstance(x, (dict, list)) for x in v))]
-    cell = lambda v: "; ".join(map(str, v)) if isinstance(v, list) else "" if v is None else str(v)  # noqa: E731
-    widths = {c: max(len(c), *(len(cell(r.get(c, ""))) for r in rows)) for c in cols}
-    lines = ["  ".join(c.upper().ljust(widths[c]) for c in cols)]
-    lines += ["  ".join(cell(r.get(c, "")).ljust(widths[c]) for c in cols) for r in rows]
-    return "\n".join(line.rstrip() for line in lines)
-
-
-def emit(obj: Any, as_json: bool, out: TextIO) -> None:
-    data = json.loads(json.dumps(obj, default=jsonable))
-    if as_json:
-        out.write(json.dumps(data, ensure_ascii=False) + "\n")
-    elif isinstance(data, list) and data and all(isinstance(r, dict) for r in data):
-        out.write(_table(data) + "\n")
-    elif isinstance(data, dict) and len(lists := [k for k, v in data.items() if isinstance(v, list) and v
-                                                  and all(isinstance(r, dict) for r in v)]) == 1:
-        out.write(_table(data[lists[0]]) + "\n")
-        out.write(json.dumps({k: v for k, v in data.items() if k != lists[0]}) + "\n")
-    elif isinstance(data, dict) and isinstance(data.get("output"), str):
-        meta = {k: v for k, v in data.items() if k != "output"}
-        out.write(data["output"] + ("" if data["output"].endswith("\n") else "\n"))
-        out.write(json.dumps(meta) + "\n")
-    else:
-        out.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+def emit(obj: Any, as_json: bool, out: TextIO, *, fmt: str | None = None, pick_paths: str | None = None) -> None:
+    from .render import pick, render
+    data = pick(obj, pick_paths) if pick_paths else obj
+    out.write(render(data, fmt or ("json" if as_json else "table")) + "\n")
 
 
 def run(op_: Op, args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
-    as_json = args.json if args.json is not None else not out.isatty()
+    from . import context
+    from .policy import PolicyDenied
+    fmt = args.output or ("json" if args.json or (args.json is None and not out.isatty()) else "table")
     kwargs = {p.name: getattr(args, p.name) for p in op_.params}
     try:
-        client = Docker(args.host, timeout=args.timeout)
-        outcome = invoke(client, op_, kwargs, dry_run=getattr(args, "dry_run", False), confirm=getattr(args, "yes", False))
+        with context.use(source="cli", ticket=args.ticket):
+            client = Docker(args.host, timeout=args.timeout)
+            outcome = invoke(client, op_, kwargs, dry_run=getattr(args, "dry_run", False),
+                             confirm=getattr(args, "yes", False))
+    except PolicyDenied as e:
+        err.write(json.dumps(e.as_dict()) + "\n")
+        return EXIT_POLICY
     except DockerError as e:
         err.write(json.dumps(e.as_dict()) + "\n")
         return EXIT_DOCKER
@@ -115,7 +111,9 @@ def run(op_: Op, args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
               "planned": outcome.planned, **({"warnings": outcome.warnings} if outcome.warnings else {}),
               "hint": "Show this to the user; re-run with --yes only after they explicitly approve."}, True, out)
         return EXIT_CONFIRM
-    emit(outcome.payload(), as_json, out)
+    if outcome.status == "ok" and outcome.warnings:
+        err.write(json.dumps({"warnings": outcome.warnings}) + "\n")
+    emit(outcome.payload(), fmt == "json", out, fmt=fmt, pick_paths=args.pick)
     unmet = isinstance(outcome.result, Mapping) and outcome.result.get("ok") is False
     return EXIT_UNMET if unmet else EXIT_OK
 
@@ -134,17 +132,33 @@ def parse(argv: Sequence[str]) -> argparse.Namespace:
     return args
 
 
+def _preamble(argv: list[str]) -> list[str]:
+    """Global options before the resource (`--profile NAME`, `--version`) and alias expansion."""
+    from . import __version__, config
+    while argv and argv[0] in ("--profile", "--version") or (argv and argv[0].startswith("--profile=")):
+        flag = argv.pop(0)
+        if flag == "--version":
+            print(f"aisb {__version__}")
+            raise SystemExit(EXIT_OK)
+        name = flag.split("=", 1)[1] if "=" in flag else (argv.pop(0) if argv else "")
+        os.environ["AISB_PROFILE"] = name
+    cfg = config.load(reload=True)
+    if argv and argv[0] in cfg.aliases:
+        argv = [*shlex.split(cfg.aliases[argv[0]]), *argv[1:]]
+    return argv
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv[:1] == ["mcp"]:
-        from .mcp import main as mcp_main
-        return mcp_main(argv[1:])
-    if argv[:1] == ["bundle"]:
-        from .bundle import main as bundle_main
-        return bundle_main(argv[1:])
-    if argv[:1] == ["portal"]:
-        from .portal import main as portal_main
-        return portal_main(argv[1:])
+    try:
+        argv = _preamble(argv)
+    except ValueError as e:  # bad config / unknown profile
+        sys.stderr.write(json.dumps({"error": "ConfigError", "message": str(e), "status": None}) + "\n")
+        return EXIT_USAGE
+    special = {"mcp": ".mcp", "bundle": ".bundle", "portal": ".portal", "exporter": ".exporter"}
+    if argv[:1] and argv[0] in special:
+        import importlib
+        return importlib.import_module(special[argv[0]], __package__).main(argv[1:])
     args = parse(argv)
     if args._op is None:
         sys.stdout.write(render_markdown())

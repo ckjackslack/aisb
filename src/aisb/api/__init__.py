@@ -4,6 +4,7 @@ from .capsule import Capsule
 from .chaos import Chaos
 from .containers import Containers
 from .fleet import Fleet
+from .governance import Audit, Config, Policy
 from .fs import Fs
 from .http import Http
 from .images import Images
@@ -16,6 +17,6 @@ from .system import System
 from .volumes import Volumes
 
 ORDER = ("containers", "images", "networks", "volumes", "system", "session", "stack", "net", "svc", "db", "redis",
-         "mongo", "kafka", "rabbit", "es", "http", "fs", "capsule", "chaos", "fleet")
-__all__ = ["ORDER", "Capsule", "Chaos", "Containers", "Db", "Fleet", "Fs", "Http", "Images", "KafkaOps", "MongoOps", "Net", "Networks", "RabbitOps",
+         "mongo", "kafka", "rabbit", "es", "http", "fs", "capsule", "chaos", "fleet", "audit", "policy", "config")
+__all__ = ["ORDER", "Audit", "Config", "Policy", "Capsule", "Chaos", "Containers", "Db", "Fleet", "Fs", "Http", "Images", "KafkaOps", "MongoOps", "Net", "Networks", "RabbitOps",
            "RedisOps", "SearchOps", "Session", "StackOps", "Svc", "System", "Volumes"]

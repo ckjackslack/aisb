@@ -30,7 +30,7 @@ def test_every_op_is_documented_and_well_formed():
 
 
 def test_op_params_do_not_shadow_cli_globals():
-    reserved = {"host", "timeout", "json", "dry_run", "yes", "resource", "op", "_op"}
+    reserved = {"host", "timeout", "json", "output", "pick", "ticket", "dry_run", "yes", "resource", "op", "_op"}
     clashes = {(o.qualname, p.name) for ops in registry().values() for o in ops.values() for p in o.params
                if p.name in reserved}
     assert not clashes

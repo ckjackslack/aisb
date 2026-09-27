@@ -16,13 +16,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from .errors import DockerError
-from .ops import EMPTY, Op, Tier, invoke, jsonable, registry
+from .ops import EMPTY, Op, Tier, get_op, invoke, jsonable, registry
 
 # Ops that touch host files or run for a long time are not offered through a browser; neither are
 # host-path arguments (the UI must never become a way to read or write the host filesystem).
 HOST_EFFECTS = frozenset({"system.blackbox", "system.events", "http.record", "containers.cp", "images.build"})
 HOST_PARAMS = frozenset({"out", "file", "spec", "env_file", "inventory"})
 CACHE_S = 3.0
+FLEET_CACHE_S = 15.0
 
 
 def exposed_ops(allow: Tier) -> dict[str, Op]:
@@ -60,6 +61,7 @@ class Portal:
         self.hosts = hosts
         self.ops = exposed_ops(allow)
         self._cache: tuple[float, dict[str, Any]] | None = None
+        self._fleet: tuple[float, dict[str, Any]] | None = None
         self._lock = threading.Lock()
 
     def cached_overview(self) -> dict[str, Any]:
@@ -69,6 +71,23 @@ class Portal:
             data = overview(self.factory())
             self._cache = (time.monotonic(), data)
             return data
+
+    def cached_fleet(self) -> dict[str, Any]:
+        """Fleet status for the Fleet tab (cached FLEET_CACHE_S: it costs one SSH round per host)."""
+        from .fleet.inventory import Inventory
+        with self._lock:
+            if self._fleet and time.monotonic() - self._fleet[0] < FLEET_CACHE_S:
+                return self._fleet[1]
+        inv = Inventory.load()
+        if not inv.hosts:
+            data: dict[str, Any] = {"enabled": False, "hint": "no fleet inventory ($AISB_FLEET / ~/.aisb/fleet.json)"}
+        else:
+            from . import context
+            with context.use(source="portal"):
+                data = {"enabled": True, **invoke(self.factory(), get_op("fleet.status"), {"tail": 0}).result}
+        with self._lock:
+            self._fleet = (time.monotonic(), data)
+        return data
 
     def call(self, qualname: str, args: dict[str, Any]) -> tuple[int, Any]:
         o = self.ops.get(qualname)
@@ -148,6 +167,11 @@ class Portal:
                         self._json(502, e.as_dict())
                     except Exception as e:  # noqa: BLE001 - keep the UI answering with a readable error
                         self._json(500, {"error": type(e).__name__, "message": str(e)})
+                elif path == "/api/fleet":
+                    try:
+                        self._json(200, portal.cached_fleet())
+                    except (DockerError, ValueError) as e:
+                        self._json(502, {"error": type(e).__name__, "message": str(e)})
                 elif path == "/api/ops":
                     self._json(200, portal.catalog())
                 else:
@@ -230,13 +254,21 @@ border:1px solid currentColor}.healthy{color:var(--ok)}.degraded{color:var(--war
 min-width:0}pre{background:var(--code);padding:10px;border-radius:6px;overflow:auto;max-height:420px;font-size:12px}
 textarea{width:100%;min-height:70px;font:12px ui-monospace,monospace;background:var(--code);color:var(--fg);
 border:1px solid var(--line);border-radius:6px;padding:8px}a{color:var(--acc)}.row2{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
-code{font:12px ui-monospace,monospace}@media(max-width:700px){.hide-s{display:none}header,main{padding-left:16px;padding-right:16px}}
+code{font:12px ui-monospace,monospace}.tabs{display:flex;gap:4px}.tabs button.on{border-color:var(--acc);color:var(--acc)}
+.pane{padding:16px 20px}.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:12px}
+.down{color:var(--bad)}@media(max-width:700px){.hide-s{display:none}header,main{padding-left:16px;padding-right:16px}}
 </style></head><body>
-<header><h1>aisb portal</h1><span class="mute" id="sum"></span><span class="sp"></span>
+<header><h1>aisb portal</h1><nav class="tabs"><button data-tab="containers" class="on">containers</button>
+<button data-tab="fleet">fleet</button><button data-tab="approvals">approvals <span id="napp" class="chip"></span></button></nav>
+<span class="mute" id="sum"></span><span class="sp"></span>
 <span class="mute">allow: __ALLOW__</span><button id="theme">theme</button><button id="refresh">refresh</button></header>
 <main id="main"><div style="min-width:0;overflow-x:auto"><table><thead><tr><th>container</th><th>verdict</th>
 <th class="hide-s">image</th><th class="hide-s">status</th><th>service</th></tr></thead><tbody id="rows"></tbody></table></div>
 <aside id="drawer" hidden></aside></main>
+<section id="fleet" class="pane" hidden><div style="overflow-x:auto"><table><thead><tr><th>host</th><th>verdict</th>
+<th class="hide-s">load</th><th class="hide-s">mem free</th><th>disk</th><th class="hide-s">containers</th><th>reasons</th></tr></thead>
+<tbody id="frows"></tbody></table></div><p class="mute" id="fnote"></p></section>
+<section id="approvals" class="pane" hidden><div id="alist"></div></section>
 <script>
 const TOKEN="__TOKEN__", ALLOW="__ALLOW__";
 const $=s=>document.querySelector(s), esc=s=>String(s??"").replace(/[&<>"']/g,c=>"&#"+c.charCodeAt(0)+";");
@@ -273,11 +305,33 @@ async function open(name){sel=name;$("#main").classList.add("open");const d=$("#
   block("doctor: "+r.verdict,{likely_cause:r.likely_cause,findings:(r.findings||[]).map(f=>`${f.severity}:${f.code}: ${f.summary}`),
   next:r.next})+block("log patterns",(r.log_patterns||r.logs||[]))}catch(e){$("#doc").innerHTML=block("doctor failed",e)}
  if(c.service){try{$("#svc").innerHTML=block("service stats",await op("svc.stats",{ref:name}))}catch(e){}}}
-$("#refresh").onclick=load;
+let tab="containers";
+async function loadFleet(){try{const f=await api("/api/fleet");if(!f.enabled){$("#frows").innerHTML="";$("#fnote").textContent=f.hint;return}
+ const s=f.summary;$("#fnote").textContent=`${s.down} down · ${s.failing} failing · ${s.degraded} degraded · ${s.healthy} healthy (refreshes every 15s)`;
+ $("#frows").innerHTML=f.hosts.map(h=>`<tr><td><b>${esc(h.host)}</b></td><td><span class="chip ${esc(h.verdict)}">${esc(h.verdict)}</span></td>
+ <td class="hide-s">${esc(h.load??"")}</td><td class="hide-s">${h.mem_free_pct!=null?esc(h.mem_free_pct)+"%":""}</td>
+ <td>${h.disk_pct!=null?esc(h.disk_pct)+"%":""}</td><td class="hide-s">${esc(h.containers??"")}</td>
+ <td class="mute">${(h.reasons||[]).map(esc).join("<br>")}</td></tr>`).join("")}
+ catch(e){$("#fnote").textContent="fleet status failed: "+JSON.stringify(e)}}
+async function loadApprovals(){let p=[];try{p=await op("runbook.pending")}catch(e){$("#alist").innerHTML=block("approvals unavailable",e);return}
+ $("#napp").textContent=p.length||"";$("#alist").innerHTML=p.length?p.map(a=>`<div class="card"><b>${esc(a.runbook)}</b>
+ <span class="mute">run ${esc(a.run)} · step ${esc(a.step)}</span><p>${esc(a.prompt)}</p>
+ ${ALLOW==="mutate"?`<div class="row2"><button data-run="${esc(a.run)}" data-d="approve">approve${a.confirmed?" &amp; resume":""}</button>
+ <button class="danger" data-run="${esc(a.run)}" data-d="deny">deny</button></div>`:`<p class="mute">read-only portal: approve with
+ <code>aisb runbook approve ${esc(a.run)} --resume</code></p>`}</div>`).join(""):`<p class="mute">nothing waiting for approval</p>`;
+ document.querySelectorAll("#alist button[data-run]").forEach(b=>b.onclick=async()=>{const deny=b.dataset.d==="deny";
+  const note=prompt(deny?"reason for denying":"note (optional)")??undefined;if(note===undefined&&deny)return;
+  try{const r=await op("runbook.approve",{run:b.dataset.run,deny,note:note||null,resume:!deny});
+   alert(deny?"denied":`approved${r.resumed?" · run "+r.resumed.status:""}`)}catch(e){alert(JSON.stringify(e))}loadApprovals()})}
+function show(t){tab=t;document.querySelectorAll(".tabs button").forEach(b=>b.classList.toggle("on",b.dataset.tab===t));
+ $("#main").hidden=t!=="containers";$("#fleet").hidden=t!=="fleet";$("#approvals").hidden=t!=="approvals";refresh()}
+function refresh(){(tab==="fleet"?loadFleet:tab==="approvals"?loadApprovals:load)();if(tab!=="approvals")loadApprovals()}
+document.querySelectorAll(".tabs button").forEach(b=>b.onclick=()=>show(b.dataset.tab));
+$("#refresh").onclick=refresh;
 $("#theme").onclick=()=>{const r=document.documentElement,cur=r.dataset.theme||(matchMedia("(prefers-color-scheme:dark)").matches?"dark":"light");
  r.dataset.theme=cur==="dark"?"light":"dark";try{localStorage.setItem("aisb-theme",r.dataset.theme)}catch(e){}};
 try{const t=localStorage.getItem("aisb-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}
-load();setInterval(()=>{if(!document.hidden)load()},10000);
+refresh();setInterval(()=>{if(!document.hidden)refresh()},10000);
 </script></body></html>
 """
 

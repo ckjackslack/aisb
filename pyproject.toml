@@ -63,5 +63,5 @@ branch = true
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-fail_under = 97
+fail_under = 98
 exclude_also = ["if TYPE_CHECKING:", 'raise AssertionError\(.unreachable.\)', "raise NotImplementedError", "if __name__ == .__main__.:"]

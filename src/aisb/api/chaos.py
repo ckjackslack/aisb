@@ -3,7 +3,7 @@
 import threading
 import time
 from collections.abc import Callable
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from ..errors import DockerError, NotFound
 from ..models import RunSpec
@@ -30,7 +30,7 @@ class Chaos(Resource, name="chaos"):
         cls = REGISTRY.detect(Target.from_inspect(info))[0]
         if cls is not None and hasattr(cls, "probe"):
             try:
-                return True, cls(Containers(self.t), Target.from_inspect(info)).probe()
+                return True, cast(Any, cls(Containers(self.t), Target.from_inspect(info))).probe()  # probe is optional per adapter
             except (DockerError, ValueError) as e:
                 return False, str(e)[:200]
         test = ((info.get("Config") or {}).get("Healthcheck") or {}).get("Test") or []

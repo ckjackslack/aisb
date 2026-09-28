@@ -4,7 +4,8 @@ Releases are cut from a tag; `.github/workflows/release.yml` does the rest.
 
 ## Every release
 
-1. Bump `__version__` in `src/aisb/__init__.py` (the package version is read from it).
+1. Bump `__version__` in `src/aisb/__init__.py` (the package version is read from it), and add a
+   `## [X.Y.Z] - date` section to `CHANGELOG.md`: it becomes the release notes (generated notes otherwise).
 2. Commit, push, and wait for `ci` to be green on that commit.
 3. Release it, either way:
    - push a tag:
@@ -22,7 +23,7 @@ The `release` workflow then:
 - checks that the tag matches `__version__`;
 - runs the unit tests;
 - builds the sdist, the wheel and the single-file `aisb.pyz`, plus `SHA256SUMS`;
-- publishes a GitHub release with all of them and generated notes. A release drafted in the GitHub UI gets the
+- publishes a GitHub release with all of them, using the version's `CHANGELOG.md` section as notes. A release drafted in the GitHub UI gets the
   files attached, and an already-published release is never rewritten;
 - publishes the sdist and wheel to PyPI, but only when PyPI publishing is enabled (see below).
 

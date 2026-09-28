@@ -56,10 +56,26 @@ jobs:
           mkdir bundle && aisb bundle bundle/aisb.pyz
           python3 -I bundle/aisb.pyz --version
           sha256sum dist/* bundle/* | sed 's|  .*/|  |' > bundle/SHA256SUMS
+      - name: release notes from CHANGELOG.md (empty when the version has no section)
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          mkdir notes
+          python - <<'PY'
+          import os, re
+          version = os.environ["TAG"].removeprefix("v")
+          text = open("CHANGELOG.md").read() if os.path.exists("CHANGELOG.md") else ""
+          m = re.search(rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)", text, re.M | re.S)
+          open("notes/notes.md", "w").write(m.group(1).strip() + "\n" if m else "")
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notes
+          path: notes/
       - uses: actions/upload-artifact@v4
         with:
           name: bundle
@@ -73,8 +89,16 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
+          name: dist
           path: out
-          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundle
+          path: out
+      - uses: actions/download-artifact@v4
+        with:
+          name: notes
+          path: notes
       - name: create the release (and its tag), complete an empty one, or leave a published one alone
         env:
           GH_TOKEN: ${{ github.token }}
@@ -83,7 +107,8 @@ jobs:
           SHA: ${{ needs.build.outputs.sha }}
         run: |
           if ! assets=$(gh release view "$TAG" --json assets --jq '.assets | length' 2>/dev/null); then
-            gh release create "$TAG" out/* --target "$SHA" --title "aisb $TAG" --generate-notes
+            if [ -s notes/notes.md ]; then notes=(--notes-file notes/notes.md); else notes=(--generate-notes); fi
+            gh release create "$TAG" out/* --target "$SHA" --title "aisb $TAG" "${notes[@]}"
           elif [ "$assets" = 0 ]; then
             gh release upload "$TAG" out/*      # e.g. a release drafted in the GitHub UI
           else

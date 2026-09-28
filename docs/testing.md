@@ -89,8 +89,26 @@ Configuration is `[tool.mutmut]` in `pyproject.toml`:
 
 The weekly `mutation` workflow covers the safety core and fails a module whose score drops below 90%.
 
-Latest local run: `policy.py` 417 of 429 mutants killed; the 12 survivors are equivalent mutants (below).
-It also found a real bug: `hosts = "all,!local"` still matched the local endpoint.
+Latest full run of the safety core (timeouts count as killed; the survivors that remain are equivalent mutants):
+
+| Module | Killed | Survived | Score |
+|---|---|---|---|
+| `policy` | 419 | 10 | 97.7% |
+| `audit` | 296 | 14 | 95.5% |
+| `ops.invoke` | 195 | 7 | 96.5% |
+| `api/session` | 1154 | 16 | 98.6% |
+| `api/chaos` | 163 | 1 | 99.4% |
+| `redact` | 165 | 6 | 96.5% |
+| MySQL client-command guard | 64 | 1 | 98.5% |
+
+The first runs scored 85–94%. The tests written for their survivors found these real bugs:
+- A policy with `hosts = "all,!local"` still applied to the local endpoint, because exclusions were ignored there.
+- Rollback reported a spurious failure for a container created during the session with an anonymous volume:
+  the volume was already gone with the container.
+- Containers recreated by rollback lost the DNS aliases on their extra networks, and lost the default `bridge`
+  when they also had a user network.
+
+(The MySQL same-line bypass was found by the differential test above, not by mutation testing.)
 
 Some mutants cannot be killed because they don't change behaviour (equivalent mutants). Examples: `24` vs `25`
 as the open end of an hour window, or `split("/", 1)` vs `rsplit("/", 1)` where only the last segment can

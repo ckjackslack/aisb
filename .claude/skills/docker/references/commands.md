@@ -285,7 +285,9 @@ Run `aisb RESOURCE OP --help` for per-flag help.
 | op | tier | usage | summary |
 |---|---|---|---|
 | log | read | `aisb audit log [--since SINCE] [--action ACTION] [--user USER] [--on ON] [--failed] [--run RUN] [--limit LIMIT]` | Changes made through aisb (newest first): who, when, where, what (secrets redacted), outcome. |
-| verify | read | `aisb audit verify` | Check the audit log's hash chain: any edited, reordered or deleted record breaks it. |
+| verify | read | `aisb audit verify [--anchors ANCHORS]` | Check the audit log's hash chain: any edited, reordered or deleted record breaks it. |
+| anchor | read | `aisb audit anchor` | A checkpoint of the log (record count + head hash, signed with the key) to keep somewhere else. |
+| keygen | mutate | `aisb audit keygen OUT [--dry-run]` | Create a signing key for the audit log, then set `key = "PATH"` under [audit] in config.toml. |
 
 ## policy
 

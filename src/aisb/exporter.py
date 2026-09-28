@@ -142,8 +142,7 @@ def serve(collector: Collector, bind: str, port: int) -> ThreadingHTTPServer:
     return srv
 
 
-def main(argv: list[str] | None = None) -> int:
-    from .client import Docker
+def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="aisb exporter", description="Prometheus metrics for a fleet or the local daemon")
     p.add_argument("--port", type=int, default=9323)
     p.add_argument("--bind", default="127.0.0.1")
@@ -153,7 +152,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--local", action="store_true", help="export the local daemon's containers instead of a fleet")
     p.add_argument("--tail", type=int, default=0, help="log lines scanned per container by the triage")
     p.add_argument("--record", action="store_true", help="also store each refresh in the metrics history")
-    args = p.parse_args(argv)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    from .client import Docker
+    args = parser().parse_args(argv)
     d = Docker(timeout=120)
 
     def refresh() -> str:

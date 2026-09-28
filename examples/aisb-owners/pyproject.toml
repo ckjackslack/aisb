@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aisb-owners"
+version = "0.1.0"
+description = "Example aisb plugin: container ownership from a label, a janitor op and a doctor rule"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+dependencies = ["aisb>=0.3"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+# The whole plugin protocol: aisb imports every module in this group (and calls setup() if there is one).
+[project.entry-points."aisb.plugins"]
+owners = "aisb_owners"
+
+[tool.setuptools.packages.find]
+where = ["src"]

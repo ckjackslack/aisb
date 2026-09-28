@@ -7,6 +7,7 @@ Mutate tools accept `dry_run`; destroy tools only execute with `confirm: true` a
 the planned API calls, so the client must go back to the user first.
 """
 
+import argparse
 import json
 import sys
 from collections.abc import Callable
@@ -248,15 +249,17 @@ def _text(payload: Any, *, error: bool = False) -> dict[str, Any]:
             "isError": error}
 
 
-def main(argv: list[str] | None = None) -> int:
-    import argparse
-
-    from .client import Docker
+def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="aisb mcp", description="MCP server over stdio")
     p.add_argument("--host", help="Docker endpoint (default: $DOCKER_HOST or local socket)")
     p.add_argument("--max-tier", choices=[t.value for t in _ORDER], default="destroy",
                    help="expose only tools up to this tier")
-    args = p.parse_args(argv)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    from .client import Docker
+    args = parser().parse_args(argv)
     Server(lambda: Docker(args.host, timeout=120), max_tier=Tier(args.max_tier)).serve()
     return 0
 

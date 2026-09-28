@@ -46,8 +46,9 @@ Each property compares aisb against an independent model or a round trip:
   - a client command after a statement is always found.
 - **yamlish** reads whatever PyYAML writes, in block and flow style. The comparison skips the few YAML 1.1-only
   readings, such as `\x85` as a line break and `1e5` as a string, because yamlish follows YAML 1.2 like compose.
-- **The audit chain** detects every edit, deletion and reordering except dropping the newest records, which is
-  a documented limit.
+- **The audit chain** detects every edit, deletion and reordering except dropping the newest records, which only
+  anchors catch (`tests/test_audit_signing.py` covers that, and edits whose whole chain was recomputed, which only
+  a signing key catches).
 - **Redaction** always replaces a secret flag's value, and `fill` restores it exactly.
 - **CVSS 3.x** scores stay between 0 and 10, are rounded, and never drop when an impact metric rises.
 
@@ -94,7 +95,7 @@ Latest full run of the safety core (timeouts count as killed; the survivors that
 | Module | Killed | Survived | Score |
 |---|---|---|---|
 | `policy` | 419 | 10 | 97.7% |
-| `audit` | 296 | 14 | 95.5% |
+| `audit` (with signing and anchors) | 610 | 15 | 97.6% |
 | `ops.invoke` | 195 | 7 | 96.5% |
 | `api/session` | 1154 | 16 | 98.6% |
 | `api/chaos` | 163 | 1 | 99.4% |

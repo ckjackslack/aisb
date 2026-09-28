@@ -129,7 +129,7 @@ Rules:
 | Need | Command |
 |---|---|
 | Would this be allowed? | `policy check [--on HOST] [--source mcp] -- RESOURCE OP ...`; `policy rules` |
-| Who changed what | `audit log --since 1d [--action 'fleet.*'] [--on HOST] [--failed] [--run ID]`; `audit verify` |
+| Who changed what | `audit log --since 1d [--action 'fleet.*'] [--on HOST] [--failed] [--run ID]`; `audit verify [--anchors FILE]` |
 | Effective settings | `config show` (profile, defaults, aliases, sinks) |
 | Repeatable procedure | `runbook list`, `runbook plan NAME`, `runbook run NAME` (destroy tier), `runbook pending`, `runbook show RUN` |
 | Desired vs actual | `fleet diff STATE TARGET`; fix with `fleet converge` (mutate) or `fleet replace-drifted` (destroy) |

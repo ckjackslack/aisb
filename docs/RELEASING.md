@@ -22,7 +22,8 @@ The `release` workflow then:
 
 - checks that the tag matches `__version__`;
 - runs the unit tests;
-- builds the sdist, the wheel and the single-file `aisb.pyz`, plus `SHA256SUMS`;
+- builds the sdist, the wheel, the single-file `aisb.pyz` and `aisb-X.Y.Z-share.tar.gz` (man pages and bash/zsh/fish
+  completion in the `share/` layout, reproducible from the commit time), plus `SHA256SUMS`;
 - publishes a GitHub release with all of them, using the version's `CHANGELOG.md` section as notes. A release drafted in the GitHub UI gets the
   files attached, and an already-published release is never rewritten;
 - publishes the sdist and wheel to PyPI, but only when PyPI publishing is enabled (see below).

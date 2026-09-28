@@ -107,8 +107,10 @@ def _wait_for(got: list[bytes], n: int) -> bytes:
 
 
 @pytest.mark.parametrize("syslog_server", ["udp", "tcp"], indirect=True)
-def test_mirror_sends_each_record_over_the_configured_transport(log, syslog_server):
+def test_mirror_sends_each_record_over_the_configured_transport(log, syslog_server, tmp_path, monkeypatch):
     target, got = syslog_server
+    audit.keygen(tmp_path / "k")
+    monkeypatch.setenv("AISB_AUDIT_KEY", str(tmp_path / "k"))  # signed records: the mac stays local too
     Path(os.environ["AISB_CONFIG"]).write_text(f'[audit]\nsyslog = "{target}"\n')
     config.reset()
     rec(path=Path("/data/x"))
@@ -116,7 +118,7 @@ def test_mirror_sends_each_record_over_the_configured_transport(log, syslog_serv
     data = _wait_for(got, 2)
     assert data.count(b"aisb: ") == 2  # tcp is a stream, udp one datagram each: both carry every record
     first = json.loads(data.split(b"aisb: ")[1].split(b"\x00")[0])  # SysLogHandler ends records with NUL
-    assert first["args"] == {"path": "/data/x"} and "hash" not in first and "prev" not in first
+    assert first["args"] == {"path": "/data/x"} and not {"hash", "prev", "mac"} & set(first) and "kid" in first
     assert list(audit._SYSLOG) == [target]    # one cached handler per target, not one per record
     (logger,) = audit._SYSLOG.values()
     assert logger.name == f"aisb.audit.syslog.{target}" and logger is not logging.getLogger()

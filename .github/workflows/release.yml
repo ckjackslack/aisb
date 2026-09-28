@@ -4,7 +4,7 @@ name: release
 #   - push a tag vX.Y.Z; or
 #   - Actions -> release -> Run workflow with tag=vX.Y.Z. If the tag doesn't exist yet, it is created on the
 #     commit the run was started from (by `gh release create --target`).
-# One build feeds a GitHub release (sdist, wheel, aisb.pyz, SHA256SUMS) and, when the repository variable
+# One build feeds a GitHub release (sdist, wheel, aisb.pyz, man pages + completions, SHA256SUMS) and, when the repository variable
 # PYPI_PUBLISH is "true", PyPI via trusted publishing. Re-running for an existing tag never rewrites the assets
 # of a published release, so it is also how an existing tag gets published to PyPI later.
 on:
@@ -49,12 +49,23 @@ jobs:
           test "v$(python -c 'import aisb; print(aisb.__version__)')" = "${{ steps.resolve.outputs.tag }}"
       - name: tests (release only what passes)
         run: pytest -q -m "not docker" -p no:cacheprovider
-      - name: sdist + wheel (PyPI) and the single-file bundle (GitHub only)
+      - name: sdist + wheel (PyPI), the single-file bundle and man pages + completions (GitHub only)
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
         run: |
           pip install build
           python -m build --outdir dist
           mkdir bundle && aisb bundle bundle/aisb.pyz
           python3 -I bundle/aisb.pyz --version
+          # share/ in the layout packagers expect: extract into a prefix such as /usr/local or ~/.local
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          mkdir -p share/bash-completion/completions share/zsh/site-functions share/fish/vendor_completions.d
+          aisb docs --man share/man/man1
+          aisb completion bash > share/bash-completion/completions/aisb
+          aisb completion zsh > share/zsh/site-functions/_aisb
+          aisb completion fish > share/fish/vendor_completions.d/aisb.fish
+          tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 --numeric-owner \
+            -czf "bundle/aisb-${TAG#v}-share.tar.gz" share
           sha256sum dist/* bundle/* | sed 's|  .*/|  |' > bundle/SHA256SUMS
       - name: release notes from CHANGELOG.md (empty when the version has no section)
         env:

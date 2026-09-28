@@ -18,6 +18,9 @@ from .ops import Op, Param, Tier, invoke, registry, render_markdown
 from .render import FORMATS
 
 EXIT_OK, EXIT_DOCKER, EXIT_USAGE, EXIT_CONFIRM, EXIT_UNMET, EXIT_POLICY = 0, 1, 2, 3, 4, 5
+# commands with their own argparse (each module has parser() and main(argv)), dispatched before the registry
+SPECIAL = {"mcp": ".mcp", "bundle": ".bundle", "portal": ".portal", "exporter": ".exporter",
+           "completion": ".completion"}
 
 
 def _add_param(p: argparse.ArgumentParser, prm: Param) -> None:
@@ -49,7 +52,8 @@ def _config_defaults(o: Op) -> dict[str, Any]:
     return {k.replace("-", "_"): v for k, v in wanted.items() if k.replace("-", "_") in names}
 
 
-def build_parser() -> argparse.ArgumentParser:
+def common_parser() -> argparse.ArgumentParser:
+    """The connection/output flags every op takes."""
     common = argparse.ArgumentParser(add_help=False)
     g = common.add_argument_group("connection/output")
     g.add_argument("--host", help="Docker endpoint, e.g. unix:///var/run/docker.sock (default: $DOCKER_HOST)")
@@ -59,7 +63,11 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--output", "-o", choices=FORMATS, help="output format (overrides --json)")
     g.add_argument("--pick", metavar="PATHS", help="only these dotted fields, per row: name,state,result.ok")
     g.add_argument("--ticket", help="change ticket for policy/audit (default: $AISB_TICKET)")
+    return common
 
+
+def build_parser() -> argparse.ArgumentParser:
+    common = common_parser()
     root = argparse.ArgumentParser(prog="aisb", description="stdlib-only Docker Engine API client")
     resources = root.add_subparsers(dest="resource", required=True, metavar="RESOURCE")
     for rname, ops in registry().items():
@@ -75,13 +83,16 @@ def build_parser() -> argparse.ArgumentParser:
             for prm in o.params:
                 _add_param(p, prm)
             p.set_defaults(_op=o, **_config_defaults(o))
-    docs = resources.add_parser("docs", help="print the Markdown command reference (or --site DIR: one page per resource)")
+    docs = resources.add_parser("docs", help="print the Markdown command reference (or --site DIR: one page per "
+                                             "resource; --man DIR: man pages)")
     docs.add_argument("--site", metavar="DIR", help="write index.md + one page per resource into DIR")
+    docs.add_argument("--man", metavar="DIR", help="write aisb.1 + one man page per resource into DIR")
     docs.set_defaults(_op=None)
     resources.add_parser("mcp", help="run the MCP server over stdio (see `aisb mcp --help`)")
     resources.add_parser("bundle", help="write aisb as one executable .pyz (see `aisb bundle --help`)")
     resources.add_parser("portal", help="local web UI, read-only by default (see `aisb portal --help`)")
     resources.add_parser("exporter", help="Prometheus metrics endpoint (see `aisb exporter --help`)")
+    resources.add_parser("completion", help="print a shell completion script: bash, zsh or fish")
     return root
 
 
@@ -159,16 +170,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as e:  # bad config / unknown profile
         sys.stderr.write(json.dumps({"error": "ConfigError", "message": str(e), "status": None}) + "\n")
         return EXIT_USAGE
-    special = {"mcp": ".mcp", "bundle": ".bundle", "portal": ".portal", "exporter": ".exporter"}
-    if argv[:1] and argv[0] in special:
+    if argv[:1] and argv[0] in SPECIAL:
         import importlib
-        return importlib.import_module(special[argv[0]], __package__).main(argv[1:])
+        return importlib.import_module(SPECIAL[argv[0]], __package__).main(argv[1:])
     args = parse(argv)
     if args._op is None:
         if getattr(args, "site", None):
             from .ops import render_site
             files = render_site(args.site)
             sys.stdout.write(json.dumps({"site": args.site, "pages": len(files)}) + "\n")
+        elif getattr(args, "man", None):
+            from .manpages import write
+            files = write(args.man)
+            sys.stdout.write(json.dumps({"man": args.man, "pages": len(files)}) + "\n")
         else:
             sys.stdout.write(render_markdown())
         return EXIT_OK

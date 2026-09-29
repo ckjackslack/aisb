@@ -61,6 +61,27 @@ Tab-friendly habits:
 - `aisb docs` prints the full command table.
 - Output is a **table on a terminal** and **JSON when piped**. Force either with `--json` / `--no-json`.
 
+Shell completion and man pages are generated from the same registry, so they cover every op, flag and choice
+(plugin ops too, once regenerated after installing the plugin):
+
+```bash
+aisb completion bash > ~/.local/share/bash-completion/completions/aisb
+aisb completion zsh > ~/.zfunc/_aisb          # with fpath=(~/.zfunc $fpath) before compinit in ~/.zshrc
+aisb completion fish > ~/.config/fish/completions/aisb.fish
+aisb docs --man ~/.local/share/man/man1 && man aisb-containers
+```
+
+Each GitHub release also has `aisb-X.Y.Z-share.tar.gz` with the man pages and all three completion scripts in the
+usual `share/` layout: `tar xzf aisb-*-share.tar.gz -C ~/.local` (or `/usr/local`).
+
+### Plugins
+
+A plugin is a Python module that registers resources and ops, doctor rules or service adapters; its ops get the
+CLI, MCP tools, the portal, docs, man pages, completion, policy and audit from aisb. aisb loads plugins from the
+`aisb.plugins` entry-point group, `$AISB_PLUGINS=mod_a,mod_b` or `[plugins] modules = [...]` in config.toml, and
+`aisb config show` lists each one as `ok` or with its error (a broken plugin never breaks aisb).
+[`examples/aisb-owners`](../examples/aisb-owners) is a complete, tested plugin to copy from.
+
 ### Each managed host
 
 1. Docker Engine running.
@@ -213,6 +234,43 @@ aisb audit log --action 'fleet.*' --on 'web*' --failed     # failed or denied fl
 aisb audit log --run 3f2a9c1d7e0b                          # everything one rollout/runbook did, every host
 aisb audit verify                                          # exit 4 if the chain is broken
 ```
+
+#### Signing and anchors
+
+The hash chain alone catches careless edits, but anyone who can write the file can edit a record and recompute
+every hash after it, and dropping the newest records leaves a valid chain. Two optional layers close those gaps:
+
+- **A signing key.** Each record also gets `kid` and `mac`, an HMAC-SHA256 of its hash. Rewriting then needs the
+  key, not just write access to the log. Keep the key readable only by the account that runs aisb (aisb refuses a
+  group- or world-readable key), ideally not by the people whose changes are logged.
+- **Anchors.** `audit anchor` prints a checkpoint (record count and head hash, signed when there is a key). Keep
+  anchors *somewhere else*: another machine, a ticket, a git repository. `audit verify --anchors FILE` then proves
+  the log still holds each checkpoint exactly, which catches dropped newest records and even a full rewrite by
+  someone holding the key.
+
+```bash
+aisb audit keygen /etc/aisb/audit.key                      # 0600, never overwritten; then configure it:
+```
+
+```toml
+[audit]
+key = "/etc/aisb/audit.key"                 # or $AISB_AUDIT_KEY
+```
+
+```bash
+aisb audit anchor >> /mnt/audit-anchors/$(hostname).jsonl   # e.g. hourly from cron, onto another machine
+aisb audit verify --anchors /mnt/audit-anchors/$(hostname).jsonl
+```
+
+`audit verify` then also reports `signed`, `unsigned` and which key checked them. Records written before the key
+was configured stay valid as an unsigned prefix. After the first signed record, an unsigned one fails
+verification: signatures were stripped, or signing failed (a missing key never loses the record, which then
+says why it is unsigned). Two things only anchors catch: someone who can read the key re-signing a rewritten log,
+and someone stripping *every* signature and re-chaining, which looks like a log that predates the key.
+
+To rotate the key, anchor the log, move it aside (keep the old key to verify it later with
+`AISB_AUDIT=old.jsonl AISB_AUDIT_KEY=old.key aisb audit verify --anchors ...`), then configure the new key; the
+next change starts a fresh log.
 
 ### Output formats
 

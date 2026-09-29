@@ -68,8 +68,12 @@ def write(out: str | Path, pkg: Path | None = None) -> dict[str, object]:
             "run": f"python3 {path.name} system ping"}
 
 
-def main(argv: list[str] | None = None) -> int:
+def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="aisb bundle", description="write aisb as a single executable .pyz")
     p.add_argument("out", nargs="?", default="aisb.pyz")
-    print(json.dumps(write(p.parse_args(argv).out)))
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    print(json.dumps(write(parser().parse_args(argv).out)))
     return 0

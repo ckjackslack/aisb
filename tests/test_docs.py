@@ -1,17 +1,17 @@
 """Every `aisb ...` command in the operator docs must parse with the real CLI (inner fleet ops included)."""
 
+import importlib
 import re
 import shlex
 from pathlib import Path
 
 import pytest
 
-from aisb.cli import parse
+from aisb.cli import SPECIAL, build_parser, parse
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = [ROOT / "docs" / "ops-guide.md", ROOT / "README.md"]
 _SHELLISH = {"", "bash", "sh", "shell", "yaml", "cron", "ini"}
-_SPECIAL = {"mcp", "bundle", "portal", "docs", "exporter"}   # hand-written subcommands with their own argparse
 
 
 def _blocks(text: str) -> list[str]:
@@ -41,7 +41,7 @@ def _commands(path: Path) -> list[tuple[str, list[str]]]:
                     argv = shlex.split(text)
                 except ValueError:
                     continue
-                if argv and argv[0] not in _SPECIAL and len(argv) >= 2 and not argv[0].startswith("["):
+                if argv and not argv[0].startswith("[") and (len(argv) >= 2 or argv[0] in SPECIAL):
                     out.append((raw.strip(), argv))
     return out
 
@@ -55,6 +55,18 @@ def test_docs_have_commands():
 
 @pytest.mark.parametrize(("where", "argv"), CASES, ids=[c[0] for c in CASES])
 def test_command_parses(where, argv):
+    if argv[0] in SPECIAL:   # commands with their own argparse; "[--flag X]" marks an optional part
+        rest, optional = [], False
+        for tok in argv[1:]:
+            optional = optional or tok.startswith("[")
+            if not optional:
+                rest.append(tok)
+            optional = optional and not tok.endswith("]")
+        importlib.import_module(f"aisb{SPECIAL[argv[0]]}").parser().parse_args(rest)
+        return
+    if argv[0] == "docs":
+        build_parser().parse_args(argv)
+        return
     args = parse(argv)
     assert args._op is not None, where
     if args._op.resource == "fleet" and args._op.name in ("query", "apply", "destroy"):

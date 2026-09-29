@@ -203,15 +203,19 @@ class Portal:
         return srv
 
 
-def main(argv: list[str] | None = None) -> int:
-    from .client import Docker
+def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="aisb portal", description="local web UI (read-only unless --allow mutate)")
     p.add_argument("--host", help="Docker endpoint (default: $DOCKER_HOST or local socket)")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--bind", default="127.0.0.1", help="listen address (keep it loopback unless you know why)")
     p.add_argument("--allow", choices=["read", "mutate"], default="read", help="highest op tier the UI may run")
     p.add_argument("--token", help="fixed token (default: random per run)")
-    args = p.parse_args(argv)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    from .client import Docker
+    args = parser().parse_args(argv)
     version = Docker(args.host).transport.version  # negotiate once, reuse for every per-request client
     portal = Portal(lambda: Docker(args.host, timeout=120, version=version), allow=Tier(args.allow), token=args.token)
     srv = portal.server(args.bind, args.port)

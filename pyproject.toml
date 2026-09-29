@@ -32,7 +32,7 @@ where = ["src"]
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-src = ["src", "tests"]
+src = ["src", "tests", "examples/aisb-owners/src"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "B", "UP", "I"]
@@ -45,7 +45,7 @@ known-local-folder = ["conftest"]
 
 [tool.mypy]
 python_version = "3.11"
-files = ["src/aisb"]
+files = ["src/aisb", "examples/aisb-owners/src"]
 ignore_missing_imports = true
 warn_unused_ignores = true
 no_implicit_optional = true
@@ -70,7 +70,7 @@ exclude_also = ["if TYPE_CHECKING:", 'raise AssertionError\(.unreachable.\)', "r
 # `mutmut run` (see docs/testing.md): mutation testing of the safety core; live Docker tests excluded for speed
 source_paths = ["src/aisb"]
 do_not_mutate = ["src/aisb/contrib/*"]  # pyinfra introspects fact signatures, which mutmut wraps
-also_copy = ["docs", "README.md", ".claude", "LICENSE", "NOTICE"]
+also_copy = ["docs", "README.md", ".claude", "LICENSE", "NOTICE", "examples"]
 pytest_add_cli_args = ["-p", "no:cacheprovider", "-m", "not docker", "-q", "--timeout", "120",  # a hanging mutant is killed
                        "--deselect", "tests/test_cli.py::test_runtime_imports_are_stdlib_only"]  # mutants import mutmut
 pytest_add_cli_args_test_selection = ["tests/"]

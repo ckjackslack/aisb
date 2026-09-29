@@ -3,6 +3,7 @@
 
 import fnmatch
 import time
+from pathlib import Path
 from typing import Annotated, Any
 
 from .. import audit, config, plugins, policy
@@ -38,9 +39,40 @@ class Audit(Resource, name="audit"):
         return out[::-1][:limit]
 
     @register(Tier.READ)
-    def verify(self) -> dict[str, Any]:
-        """Check the audit log's hash chain: any edited, reordered or deleted record breaks it."""
-        return {"path": str(audit.path()), **audit.verify()}
+    def verify(self, *, anchors: Annotated[str | None, "file of checkpoints saved by `audit anchor`: the log must "
+                                                       "still hold each one"] = None) -> dict[str, Any]:
+        """Check the audit log's hash chain: any edited, reordered or deleted record breaks it.
+
+        With a signing key configured ([audit] key), every signature is checked too; with --anchors, the log must
+        still contain each saved checkpoint, which also catches dropped newest records and full rewrites."""
+        found = audit.read_anchors(Path(anchors)) if anchors else []
+        return {"path": str(audit.path()), **audit.verify(anchors=found)}
+
+    @register(Tier.READ)
+    def anchor(self) -> dict[str, Any]:
+        """A checkpoint of the log (record count + head hash, signed with the key) to keep somewhere else.
+
+        Append it to a file on another machine, a ticket or a git repo: `aisb audit anchor >> anchors.jsonl`.
+        Later, `audit verify --anchors anchors.jsonl` proves nothing up to that point was removed or rewritten."""
+        return audit.anchor()
+
+    @register(Tier.MUTATE)
+    def keygen(self, out: Annotated[str, "where to write the key (created 0600, never overwritten)"]
+               ) -> dict[str, Any]:
+        """Create a signing key for the audit log, then set `key = "PATH"` under [audit] in config.toml.
+
+        Keep it readable only by the account that runs aisb: whoever can read it can re-sign a rewritten log."""
+        target = Path(out).expanduser()
+        if target.exists():
+            raise ValueError(f"{target} already exists; keys are never overwritten")
+        if self.t.planning:
+            self.t.note(action="create audit signing key", path=str(target), mode="0600")
+            return {"key": str(target)}
+        try:
+            made = audit.keygen(target)
+        except FileExistsError:
+            raise ValueError(f"{target} already exists; keys are never overwritten") from None
+        return {**made, "next": f'set key = "{target}" under [audit] in {config.default_path()}'}
 
 
 class Policy(Resource, name="policy"):

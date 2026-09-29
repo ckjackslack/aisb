@@ -2,6 +2,27 @@
 
 All notable changes to aisb. The release workflow publishes the section for a version as its GitHub release notes.
 
+## [0.4.0] - 2026-09-29
+
+### Added
+- **Signed audit log.** `[audit] key` (or `$AISB_AUDIT_KEY`) adds an HMAC-SHA256 signature to every record, so
+  rewriting the log needs the key, not just write access to the file. `aisb audit keygen PATH` creates a key
+  (0600, never overwritten); a group- or world-readable key is refused.
+- **Audit anchors.** `aisb audit anchor` prints a signed checkpoint (record count + head hash) to keep elsewhere;
+  `aisb audit verify --anchors FILE` proves the log still holds every checkpoint. This catches what the chain
+  alone could not: dropped newest records, and a full rewrite even by someone holding the key.
+- **Shell completion** for bash (3.2+), zsh and fish: `aisb completion SHELL`, generated from the same argparse
+  tree the CLI uses, so every op, flag and choice completes, including plugin ops.
+- **Man pages**: `aisb docs --man DIR` writes aisb(1), one page per resource and one per special command.
+- Releases include `aisb-X.Y.Z-share.tar.gz`: man pages and completion scripts in the standard `share/` layout.
+- **Example plugin** `examples/aisb-owners`: an installable package with a read op, a mutate op with dry run, and
+  a doctor rule. aisb's suite runs it end to end, and CI installs it through its entry point.
+
+### Changed
+- `aisb audit verify` also reports `signed`, `unsigned` and the checking key when signatures are present, and
+  `anchors` when given. Its output is unchanged for unsigned logs.
+- The syslog mirror never sends the signature (`mac`), like the chain fields.
+
 ## [0.3.0] - 2026-09-28
 
 ### Security

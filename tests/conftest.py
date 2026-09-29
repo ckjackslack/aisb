@@ -188,7 +188,7 @@ def _isolated_state(tmp_path_factory, monkeypatch):
     home = tmp_path_factory.mktemp("aisb-home")
     monkeypatch.setenv("AISB_HOME", str(home))
     monkeypatch.setenv("AISB_CONFIG", str(home / "config.toml"))
-    for var in ("AISB_PROFILE", "AISB_PLUGINS", "AISB_TICKET", "AISB_AUDIT"):
+    for var in ("AISB_PROFILE", "AISB_PLUGINS", "AISB_TICKET", "AISB_AUDIT", "AISB_AUDIT_KEY"):
         monkeypatch.delenv(var, raising=False)
     config.reset()
     plugins.reset()

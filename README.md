@@ -232,7 +232,15 @@ aisb fleet logs @web api --since 10m --patterns          # merged across hosts, 
 **Agents and UI.** The MCP server also exposes resources (`aisb://fleet/status`, `aisb://runbooks/pending`,
 `aisb://audit/recent`, `aisb://policy/rules`, `aisb://runbooks/{name}`) and prompts (`investigate-incident`, `rollout`,
 `daily-check`, one per runbook). The portal adds Fleet and Approvals tabs. **Plugins** (`aisb.plugins` entry points,
-`$AISB_PLUGINS`, `[plugins] modules`) add resources that get CLI, MCP, docs, policy and audit for free.
+`$AISB_PLUGINS`, `[plugins] modules`) add resources that get CLI, MCP, docs, man pages, completion, policy and audit
+for free; [`examples/aisb-owners`](examples/aisb-owners) is a complete one to copy.
+
+**Tamper evidence.** With `[audit] key` set (`aisb audit keygen PATH`), each audit record is HMAC-signed, so
+rewriting the log needs the key. `aisb audit anchor` prints a signed checkpoint to keep elsewhere, and
+`aisb audit verify --anchors FILE` proves no records were dropped or rewritten since.
+
+**Shell and man.** `aisb completion bash|zsh|fish` and `aisb docs --man DIR` generate completion scripts and man
+pages from the registry. Releases ship both in `aisb-X.Y.Z-share.tar.gz`.
 
 ## Design
 
@@ -254,8 +262,10 @@ contrib/       optional third-party integrations (pyinfra facts, operations, @ai
 context.py     who/where/why of a call (user, source, host, ticket, run_id), propagated into fleet workers
 config.py      config.toml: defaults, aliases, profiles, notify sinks, plugins, policy
 policy.py      rule matching and effects (deny, ticket, windows, deny_if) evaluated in invoke()
-audit.py       hash-chained JSONL audit log (flock, redaction, optional syslog)
+audit.py       hash-chained JSONL audit log (flock, redaction, optional syslog, HMAC signing, anchors)
 plugins.py     entry-point / env / config plugin loading
+completion.py  bash / zsh / fish completion generated from the argparse tree
+manpages.py    roff man pages: aisb(1), one per resource and special command
 render.py      output formats: json, ndjson, table, csv, yaml, raw; --pick projection
 runbooks.py    runbook parsing, rendering, persisted run state
 notify.py      alert sinks: webhook, slack, ntfy, email

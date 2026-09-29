@@ -146,7 +146,8 @@ def in_window(window: Mapping[str, Any], now: dt.datetime) -> bool:
 
 # How you find out why something is denied: a broad rule (e.g. "every op needs a ticket") must not lock these
 # away. A rule that names one of them in `match.op` still applies (e.g. hiding the audit log from agents).
-GOVERNANCE_READS = frozenset({"policy.rules", "policy.check", "audit.log", "audit.verify", "config.show"})
+GOVERNANCE_READS = frozenset({"policy.rules", "policy.check", "audit.log", "audit.verify", "audit.anchor",
+                              "config.show"})
 
 
 def check(rules: Iterable[Mapping[str, Any]], op: str, tier: str, kwargs: Mapping[str, Any], ctx: Ctx,

@@ -2,7 +2,7 @@
 
 All notable changes to aisb. The release workflow publishes the section for a version as its GitHub release notes.
 
-## [Unreleased]
+## [0.4.0] - 2026-09-29
 
 ### Added
 - **Signed audit log.** `[audit] key` (or `$AISB_AUDIT_KEY`) adds an HMAC-SHA256 signature to every record, so
